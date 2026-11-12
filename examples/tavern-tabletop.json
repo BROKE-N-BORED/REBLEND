@@ -1,742 +1,818 @@
 {
-    "animation": {
-        "end_frame": 48,
-        "fps": 24,
-        "keys": {
-            "loaf": {
-                "position": [],
-                "rotation": [
-                    [
-                        0,
-                        [
-                            0.0,
-                            0.0,
-                            0.0
-                        ]
-                    ],
-                    [
-                        48,
-                        [
-                            0.0,
-                            0.0,
-                            360.0
-                        ]
-                    ]
-                ],
-                "scale": []
-            },
-            "mug": {
-                "position": [
-                    [
-                        0,
-                        [
-                            -60.0,
-                            -20.0,
-                            91.0
-                        ]
-                    ],
-                    [
-                        48,
-                        [
-                            60.0,
-                            -20.0,
-                            91.0
-                        ]
-                    ]
-                ],
-                "rotation": [
-                    [
-                        0,
-                        [
-                            0.0,
-                            0.0,
-                            0.0
-                        ]
-                    ],
-                    [
-                        48,
-                        [
-                            0.0,
-                            0.0,
-                            180.0
-                        ]
-                    ]
-                ],
-                "scale": []
-            }
-        }
+  "name": "Tavern tabletop",
+  "version": 2,
+  "objects": [
+    {
+      "id": "floor",
+      "name": "Floor",
+      "shape": "plane",
+      "params": {
+        "size": [
+          600.0,
+          600.0
+        ]
+      },
+      "position": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kind": "object",
+      "smooth_shading": false,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#6b5a44",
+        "roughness": 0.9,
+        "metalness": 0.0,
+        "texture": "wood_grain"
+      }
     },
-    "cameras": [
-        {
-            "look_at": [
-                0.0,
-                0.0,
-                60.0
-            ],
-            "name": "Front",
-            "position": [
-                -350.0,
-                -350.0,
-                250.0
+    {
+      "id": "tabletop",
+      "name": "Table top",
+      "shape": "box",
+      "params": {
+        "size": [
+          220.0,
+          120.0,
+          8.0
+        ]
+      },
+      "position": [
+        0.0,
+        0.0,
+        75.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kind": "object",
+      "smooth_shading": false,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#8a5a2b",
+        "roughness": 0.7,
+        "metalness": 0.0,
+        "texture": "wood_grain"
+      }
+    },
+    {
+      "id": "leg1",
+      "name": "Table leg 1",
+      "shape": "cylinder",
+      "params": {
+        "height": 71.0,
+        "radius": 6.0,
+        "segments": 12
+      },
+      "position": [
+        -100.0,
+        -50.0,
+        35.5
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kind": "object",
+      "smooth_shading": true,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#6e4520",
+        "roughness": 0.8,
+        "metalness": 0.0,
+        "texture": "wood_grain"
+      }
+    },
+    {
+      "id": "leg2",
+      "name": "Table leg 2",
+      "shape": "cylinder",
+      "params": {
+        "height": 71.0,
+        "radius": 6.0,
+        "segments": 12
+      },
+      "position": [
+        100.0,
+        -50.0,
+        35.5
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kind": "object",
+      "smooth_shading": true,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#6e4520",
+        "roughness": 0.8,
+        "metalness": 0.0,
+        "texture": "wood_grain"
+      }
+    },
+    {
+      "id": "leg3",
+      "name": "Table leg 3",
+      "shape": "cylinder",
+      "params": {
+        "height": 71.0,
+        "radius": 6.0,
+        "segments": 12
+      },
+      "position": [
+        -100.0,
+        50.0,
+        35.5
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kind": "object",
+      "smooth_shading": true,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#6e4520",
+        "roughness": 0.8,
+        "metalness": 0.0,
+        "texture": "wood_grain"
+      }
+    },
+    {
+      "id": "leg4",
+      "name": "Table leg 4",
+      "shape": "cylinder",
+      "params": {
+        "height": 71.0,
+        "radius": 6.0,
+        "segments": 12
+      },
+      "position": [
+        100.0,
+        50.0,
+        35.5
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kind": "object",
+      "smooth_shading": true,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#6e4520",
+        "roughness": 0.8,
+        "metalness": 0.0,
+        "texture": "wood_grain"
+      }
+    },
+    {
+      "id": "mug",
+      "name": "Mug",
+      "shape": "cylinder",
+      "params": {
+        "height": 24.0,
+        "radius": 14.0,
+        "segments": 16
+      },
+      "position": [
+        -60.0,
+        -20.0,
+        91.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kind": "object",
+      "smooth_shading": true,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#7a4a8a",
+        "roughness": 0.4,
+        "metalness": 0.0,
+        "texture": "none"
+      }
+    },
+    {
+      "id": "plate",
+      "name": "Plate",
+      "shape": "cylinder",
+      "params": {
+        "height": 4.0,
+        "radius": 30.0,
+        "segments": 20
+      },
+      "position": [
+        50.0,
+        20.0,
+        81.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kind": "object",
+      "smooth_shading": true,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#c8c8c8",
+        "roughness": 0.3,
+        "metalness": 0.8,
+        "texture": "brushed_metal"
+      }
+    },
+    {
+      "id": "loaf",
+      "name": "Loaf",
+      "shape": "sphere",
+      "params": {
+        "radius": 22.0,
+        "rings": 10,
+        "segments": 16
+      },
+      "position": [
+        50.0,
+        20.0,
+        96.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.3,
+        0.9,
+        0.6
+      ],
+      "kind": "object",
+      "smooth_shading": true,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#a06a35",
+        "roughness": 0.85,
+        "metalness": 0.0,
+        "texture": "worn_leather"
+      }
+    },
+    {
+      "id": "candle",
+      "name": "Candle",
+      "shape": "cylinder",
+      "params": {
+        "height": 30.0,
+        "radius": 6.0,
+        "segments": 12
+      },
+      "position": [
+        -20.0,
+        40.0,
+        94.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kind": "object",
+      "smooth_shading": true,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#e8e0c8",
+        "roughness": 0.6,
+        "metalness": 0.0,
+        "texture": "none"
+      }
+    },
+    {
+      "id": "flame",
+      "name": "Flame",
+      "shape": "sphere",
+      "params": {
+        "radius": 5.0,
+        "rings": 8,
+        "segments": 12
+      },
+      "position": [
+        -20.0,
+        40.0,
+        114.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.6
+      ],
+      "kind": "object",
+      "smooth_shading": true,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#ffcc33",
+        "roughness": 0.5,
+        "metalness": 0.0,
+        "texture": "none"
+      }
+    },
+    {
+      "id": "stoolseat",
+      "name": "Stool seat",
+      "shape": "box",
+      "params": {
+        "size": [
+          60.0,
+          60.0,
+          6.0
+        ]
+      },
+      "position": [
+        150.0,
+        120.0,
+        45.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kind": "object",
+      "smooth_shading": false,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#8a5a2b",
+        "roughness": 0.7,
+        "metalness": 0.0,
+        "texture": "wood_grain"
+      }
+    },
+    {
+      "id": "stoolleg1",
+      "name": "Stool leg 1",
+      "shape": "cylinder",
+      "params": {
+        "height": 42.0,
+        "radius": 4.0,
+        "segments": 10
+      },
+      "position": [
+        128.0,
+        98.0,
+        21.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kind": "object",
+      "smooth_shading": true,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#6e4520",
+        "roughness": 0.8,
+        "metalness": 0.0,
+        "texture": "wood_grain"
+      }
+    },
+    {
+      "id": "stoolleg2",
+      "name": "Stool leg 2",
+      "shape": "cylinder",
+      "params": {
+        "height": 42.0,
+        "radius": 4.0,
+        "segments": 10
+      },
+      "position": [
+        172.0,
+        98.0,
+        21.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kind": "object",
+      "smooth_shading": true,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#6e4520",
+        "roughness": 0.8,
+        "metalness": 0.0,
+        "texture": "wood_grain"
+      }
+    },
+    {
+      "id": "stoolleg3",
+      "name": "Stool leg 3",
+      "shape": "cylinder",
+      "params": {
+        "height": 42.0,
+        "radius": 4.0,
+        "segments": 10
+      },
+      "position": [
+        128.0,
+        142.0,
+        21.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kind": "object",
+      "smooth_shading": true,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#6e4520",
+        "roughness": 0.8,
+        "metalness": 0.0,
+        "texture": "wood_grain"
+      }
+    },
+    {
+      "id": "stoolleg4",
+      "name": "Stool leg 4",
+      "shape": "cylinder",
+      "params": {
+        "height": 42.0,
+        "radius": 4.0,
+        "segments": 10
+      },
+      "position": [
+        172.0,
+        142.0,
+        21.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kind": "object",
+      "smooth_shading": true,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#6e4520",
+        "roughness": 0.8,
+        "metalness": 0.0,
+        "texture": "wood_grain"
+      }
+    },
+    {
+      "id": "barrel",
+      "name": "Barrel",
+      "shape": "cylinder",
+      "params": {
+        "height": 70.0,
+        "radius": 30.0,
+        "segments": 16
+      },
+      "position": [
+        -160.0,
+        120.0,
+        35.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kind": "object",
+      "smooth_shading": true,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#7a4f24",
+        "roughness": 0.75,
+        "metalness": 0.0,
+        "texture": "wood_grain"
+      }
+    },
+    {
+      "id": "ring",
+      "name": "Rope ring",
+      "shape": "torus",
+      "params": {
+        "major_radius": 25.0,
+        "minor_radius": 6.0,
+        "segments": 24,
+        "sides": 10
+      },
+      "position": [
+        0.0,
+        -40.0,
+        85.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kind": "object",
+      "smooth_shading": true,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#b89a5a",
+        "roughness": 0.9,
+        "metalness": 0.0,
+        "texture": "worn_leather"
+      }
+    },
+    {
+      "id": "roofcone",
+      "name": "Roof cone",
+      "shape": "cone",
+      "params": {
+        "height": 50.0,
+        "radius": 40.0,
+        "segments": 16
+      },
+      "position": [
+        -160.0,
+        -120.0,
+        25.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kind": "object",
+      "smooth_shading": true,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#5a6e8a",
+        "roughness": 0.6,
+        "metalness": 0.1,
+        "texture": "none"
+      }
+    }
+  ],
+  "cameras": [
+    {
+      "name": "Front",
+      "position": [
+        -350.0,
+        -350.0,
+        250.0
+      ],
+      "look_at": [
+        0.0,
+        0.0,
+        60.0
+      ]
+    },
+    {
+      "name": "Top",
+      "position": [
+        0.0,
+        0.0,
+        600.0
+      ],
+      "look_at": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  ],
+  "lights": [
+    {
+      "color": "#ffffff",
+      "intensity": 0.9,
+      "kind": "key",
+      "name": "Key",
+      "position": [
+        -300.0,
+        -300.0,
+        400.0
+      ]
+    },
+    {
+      "color": "#cfe0ff",
+      "intensity": 0.45,
+      "kind": "fill",
+      "name": "Fill",
+      "position": [
+        300.0,
+        -200.0,
+        150.0
+      ]
+    },
+    {
+      "color": "#ffe8c8",
+      "intensity": 0.5,
+      "kind": "rim",
+      "name": "Rim",
+      "position": [
+        0.0,
+        400.0,
+        250.0
+      ]
+    },
+    {
+      "color": "#ffffff",
+      "intensity": 0.35,
+      "kind": "ambient",
+      "name": "Ambient",
+      "position": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  ],
+  "animation": {
+    "fps": 24,
+    "end_frame": 48,
+    "keys": {
+      "loaf": {
+        "position": [],
+        "rotation": [
+          [
+            0,
+            [
+              0.0,
+              0.0,
+              0.0
             ]
-        },
-        {
-            "look_at": [
-                0.0,
-                0.0,
-                0.0
-            ],
-            "name": "Top",
-            "position": [
-                0.0,
-                0.0,
-                600.0
+          ],
+          [
+            48,
+            [
+              0.0,
+              0.0,
+              360.0
             ]
-        }
-    ],
-    "lights": [
-        {
-            "color": "#ffffff",
-            "intensity": 0.9,
-            "kind": "key",
-            "name": "Key",
-            "position": [
-                -300.0,
-                -300.0,
-                400.0
+          ]
+        ],
+        "scale": []
+      },
+      "mug": {
+        "position": [
+          [
+            0,
+            [
+              -60.0,
+              -20.0,
+              91.0
             ]
-        },
-        {
-            "color": "#cfe0ff",
-            "intensity": 0.45,
-            "kind": "fill",
-            "name": "Fill",
-            "position": [
-                300.0,
-                -200.0,
-                150.0
+          ],
+          [
+            48,
+            [
+              60.0,
+              -20.0,
+              91.0
             ]
-        },
-        {
-            "color": "#ffe8c8",
-            "intensity": 0.5,
-            "kind": "rim",
-            "name": "Rim",
-            "position": [
-                0.0,
-                400.0,
-                250.0
+          ]
+        ],
+        "rotation": [
+          [
+            0,
+            [
+              0.0,
+              0.0,
+              0.0
             ]
-        },
-        {
-            "color": "#ffffff",
-            "intensity": 0.35,
-            "kind": "ambient",
-            "name": "Ambient",
-            "position": [
-                0.0,
-                0.0,
-                0.0
+          ],
+          [
+            48,
+            [
+              0.0,
+              0.0,
+              180.0
             ]
-        }
-    ],
-    "name": "Tavern tabletop",
-    "objects": [
-        {
-            "id": "floor",
-            "material": {
-                "base_color": "#6b5a44",
-                "metalness": 0.0,
-                "roughness": 0.9,
-                "texture": "wood_grain"
-            },
-            "name": "Floor",
-            "params": {
-                "size": [
-                    600.0,
-                    600.0
-                ]
-            },
-            "position": [
-                0.0,
-                0.0,
-                0.0
-            ],
-            "rotation": [
-                0.0,
-                0.0,
-                0.0
-            ],
-            "scale": [
-                1.0,
-                1.0,
-                1.0
-            ],
-            "shape": "plane"
-        },
-        {
-            "id": "tabletop",
-            "material": {
-                "base_color": "#8a5a2b",
-                "metalness": 0.0,
-                "roughness": 0.7,
-                "texture": "wood_grain"
-            },
-            "name": "Table top",
-            "params": {
-                "size": [
-                    220.0,
-                    120.0,
-                    8.0
-                ]
-            },
-            "position": [
-                0.0,
-                0.0,
-                75.0
-            ],
-            "rotation": [
-                0.0,
-                0.0,
-                0.0
-            ],
-            "scale": [
-                1.0,
-                1.0,
-                1.0
-            ],
-            "shape": "box"
-        },
-        {
-            "id": "leg1",
-            "material": {
-                "base_color": "#6e4520",
-                "metalness": 0.0,
-                "roughness": 0.8,
-                "texture": "wood_grain"
-            },
-            "name": "Table leg 1",
-            "params": {
-                "height": 71.0,
-                "radius": 6.0,
-                "segments": 12
-            },
-            "position": [
-                -100.0,
-                -50.0,
-                35.5
-            ],
-            "rotation": [
-                0.0,
-                0.0,
-                0.0
-            ],
-            "scale": [
-                1.0,
-                1.0,
-                1.0
-            ],
-            "shape": "cylinder"
-        },
-        {
-            "id": "leg2",
-            "material": {
-                "base_color": "#6e4520",
-                "metalness": 0.0,
-                "roughness": 0.8,
-                "texture": "wood_grain"
-            },
-            "name": "Table leg 2",
-            "params": {
-                "height": 71.0,
-                "radius": 6.0,
-                "segments": 12
-            },
-            "position": [
-                100.0,
-                -50.0,
-                35.5
-            ],
-            "rotation": [
-                0.0,
-                0.0,
-                0.0
-            ],
-            "scale": [
-                1.0,
-                1.0,
-                1.0
-            ],
-            "shape": "cylinder"
-        },
-        {
-            "id": "leg3",
-            "material": {
-                "base_color": "#6e4520",
-                "metalness": 0.0,
-                "roughness": 0.8,
-                "texture": "wood_grain"
-            },
-            "name": "Table leg 3",
-            "params": {
-                "height": 71.0,
-                "radius": 6.0,
-                "segments": 12
-            },
-            "position": [
-                -100.0,
-                50.0,
-                35.5
-            ],
-            "rotation": [
-                0.0,
-                0.0,
-                0.0
-            ],
-            "scale": [
-                1.0,
-                1.0,
-                1.0
-            ],
-            "shape": "cylinder"
-        },
-        {
-            "id": "leg4",
-            "material": {
-                "base_color": "#6e4520",
-                "metalness": 0.0,
-                "roughness": 0.8,
-                "texture": "wood_grain"
-            },
-            "name": "Table leg 4",
-            "params": {
-                "height": 71.0,
-                "radius": 6.0,
-                "segments": 12
-            },
-            "position": [
-                100.0,
-                50.0,
-                35.5
-            ],
-            "rotation": [
-                0.0,
-                0.0,
-                0.0
-            ],
-            "scale": [
-                1.0,
-                1.0,
-                1.0
-            ],
-            "shape": "cylinder"
-        },
-        {
-            "id": "mug",
-            "material": {
-                "base_color": "#7a4a8a",
-                "metalness": 0.0,
-                "roughness": 0.4,
-                "texture": "none"
-            },
-            "name": "Mug",
-            "params": {
-                "height": 24.0,
-                "radius": 14.0,
-                "segments": 16
-            },
-            "position": [
-                -60.0,
-                -20.0,
-                91.0
-            ],
-            "rotation": [
-                0.0,
-                0.0,
-                0.0
-            ],
-            "scale": [
-                1.0,
-                1.0,
-                1.0
-            ],
-            "shape": "cylinder"
-        },
-        {
-            "id": "plate",
-            "material": {
-                "base_color": "#c8c8c8",
-                "metalness": 0.8,
-                "roughness": 0.3,
-                "texture": "brushed_metal"
-            },
-            "name": "Plate",
-            "params": {
-                "height": 4.0,
-                "radius": 30.0,
-                "segments": 20
-            },
-            "position": [
-                50.0,
-                20.0,
-                81.0
-            ],
-            "rotation": [
-                0.0,
-                0.0,
-                0.0
-            ],
-            "scale": [
-                1.0,
-                1.0,
-                1.0
-            ],
-            "shape": "cylinder"
-        },
-        {
-            "id": "loaf",
-            "material": {
-                "base_color": "#a06a35",
-                "metalness": 0.0,
-                "roughness": 0.85,
-                "texture": "worn_leather"
-            },
-            "name": "Loaf",
-            "params": {
-                "radius": 22.0,
-                "rings": 10,
-                "segments": 16
-            },
-            "position": [
-                50.0,
-                20.0,
-                96.0
-            ],
-            "rotation": [
-                0.0,
-                0.0,
-                0.0
-            ],
-            "scale": [
-                1.3,
-                0.9,
-                0.6
-            ],
-            "shape": "sphere"
-        },
-        {
-            "id": "candle",
-            "material": {
-                "base_color": "#e8e0c8",
-                "metalness": 0.0,
-                "roughness": 0.6,
-                "texture": "none"
-            },
-            "name": "Candle",
-            "params": {
-                "height": 30.0,
-                "radius": 6.0,
-                "segments": 12
-            },
-            "position": [
-                -20.0,
-                40.0,
-                94.0
-            ],
-            "rotation": [
-                0.0,
-                0.0,
-                0.0
-            ],
-            "scale": [
-                1.0,
-                1.0,
-                1.0
-            ],
-            "shape": "cylinder"
-        },
-        {
-            "id": "flame",
-            "material": {
-                "base_color": "#ffcc33",
-                "metalness": 0.0,
-                "roughness": 0.5,
-                "texture": "none"
-            },
-            "name": "Flame",
-            "params": {
-                "radius": 5.0,
-                "rings": 8,
-                "segments": 12
-            },
-            "position": [
-                -20.0,
-                40.0,
-                114.0
-            ],
-            "rotation": [
-                0.0,
-                0.0,
-                0.0
-            ],
-            "scale": [
-                1.0,
-                1.0,
-                1.6
-            ],
-            "shape": "sphere"
-        },
-        {
-            "id": "stoolseat",
-            "material": {
-                "base_color": "#8a5a2b",
-                "metalness": 0.0,
-                "roughness": 0.7,
-                "texture": "wood_grain"
-            },
-            "name": "Stool seat",
-            "params": {
-                "size": [
-                    60.0,
-                    60.0,
-                    6.0
-                ]
-            },
-            "position": [
-                150.0,
-                120.0,
-                45.0
-            ],
-            "rotation": [
-                0.0,
-                0.0,
-                0.0
-            ],
-            "scale": [
-                1.0,
-                1.0,
-                1.0
-            ],
-            "shape": "box"
-        },
-        {
-            "id": "stoolleg1",
-            "material": {
-                "base_color": "#6e4520",
-                "metalness": 0.0,
-                "roughness": 0.8,
-                "texture": "wood_grain"
-            },
-            "name": "Stool leg 1",
-            "params": {
-                "height": 42.0,
-                "radius": 4.0,
-                "segments": 10
-            },
-            "position": [
-                128.0,
-                98.0,
-                21.0
-            ],
-            "rotation": [
-                0.0,
-                0.0,
-                0.0
-            ],
-            "scale": [
-                1.0,
-                1.0,
-                1.0
-            ],
-            "shape": "cylinder"
-        },
-        {
-            "id": "stoolleg2",
-            "material": {
-                "base_color": "#6e4520",
-                "metalness": 0.0,
-                "roughness": 0.8,
-                "texture": "wood_grain"
-            },
-            "name": "Stool leg 2",
-            "params": {
-                "height": 42.0,
-                "radius": 4.0,
-                "segments": 10
-            },
-            "position": [
-                172.0,
-                98.0,
-                21.0
-            ],
-            "rotation": [
-                0.0,
-                0.0,
-                0.0
-            ],
-            "scale": [
-                1.0,
-                1.0,
-                1.0
-            ],
-            "shape": "cylinder"
-        },
-        {
-            "id": "stoolleg3",
-            "material": {
-                "base_color": "#6e4520",
-                "metalness": 0.0,
-                "roughness": 0.8,
-                "texture": "wood_grain"
-            },
-            "name": "Stool leg 3",
-            "params": {
-                "height": 42.0,
-                "radius": 4.0,
-                "segments": 10
-            },
-            "position": [
-                128.0,
-                142.0,
-                21.0
-            ],
-            "rotation": [
-                0.0,
-                0.0,
-                0.0
-            ],
-            "scale": [
-                1.0,
-                1.0,
-                1.0
-            ],
-            "shape": "cylinder"
-        },
-        {
-            "id": "stoolleg4",
-            "material": {
-                "base_color": "#6e4520",
-                "metalness": 0.0,
-                "roughness": 0.8,
-                "texture": "wood_grain"
-            },
-            "name": "Stool leg 4",
-            "params": {
-                "height": 42.0,
-                "radius": 4.0,
-                "segments": 10
-            },
-            "position": [
-                172.0,
-                142.0,
-                21.0
-            ],
-            "rotation": [
-                0.0,
-                0.0,
-                0.0
-            ],
-            "scale": [
-                1.0,
-                1.0,
-                1.0
-            ],
-            "shape": "cylinder"
-        },
-        {
-            "id": "barrel",
-            "material": {
-                "base_color": "#7a4f24",
-                "metalness": 0.0,
-                "roughness": 0.75,
-                "texture": "wood_grain"
-            },
-            "name": "Barrel",
-            "params": {
-                "height": 70.0,
-                "radius": 30.0,
-                "segments": 16
-            },
-            "position": [
-                -160.0,
-                120.0,
-                35.0
-            ],
-            "rotation": [
-                0.0,
-                0.0,
-                0.0
-            ],
-            "scale": [
-                1.0,
-                1.0,
-                1.0
-            ],
-            "shape": "cylinder"
-        },
-        {
-            "id": "ring",
-            "material": {
-                "base_color": "#b89a5a",
-                "metalness": 0.0,
-                "roughness": 0.9,
-                "texture": "worn_leather"
-            },
-            "name": "Rope ring",
-            "params": {
-                "major_radius": 25.0,
-                "minor_radius": 6.0,
-                "segments": 24,
-                "sides": 10
-            },
-            "position": [
-                0.0,
-                -40.0,
-                85.0
-            ],
-            "rotation": [
-                0.0,
-                0.0,
-                0.0
-            ],
-            "scale": [
-                1.0,
-                1.0,
-                1.0
-            ],
-            "shape": "torus"
-        },
-        {
-            "id": "roofcone",
-            "material": {
-                "base_color": "#5a6e8a",
-                "metalness": 0.1,
-                "roughness": 0.6,
-                "texture": "none"
-            },
-            "name": "Roof cone",
-            "params": {
-                "height": 50.0,
-                "radius": 40.0,
-                "segments": 16
-            },
-            "position": [
-                -160.0,
-                -120.0,
-                25.0
-            ],
-            "rotation": [
-                0.0,
-                0.0,
-                0.0
-            ],
-            "scale": [
-                1.0,
-                1.0,
-                1.0
-            ],
-            "shape": "cone"
-        }
-    ],
-    "version": 1
+          ]
+        ],
+        "scale": []
+      }
+    }
+  }
 }

@@ -7,22 +7,107 @@ the soft budget, and nothing is ever blocked for size.
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from . import animation as anim_mod
-from .scene import (find_object, load_scene, new_object, new_scene,
-                    save_scene, scene_copy, total_triangles)
+from . import meshfile as meshfile_mod
+from . import meshio as meshio_mod
+from . import meshio_glb as meshio_glb_mod
+from . import meshio_obj as meshio_obj_mod
+from .scene import (default_smooth_shading, find_object, load_scene,
+                    new_object, new_scene, save_scene, scene_copy,
+                    total_triangles)
 from .viewport import Viewport
 
 SOFT_TRI_BUDGET = 100000
 
 
+class ImportDialog(QtWidgets.QDialog):
+    """Scale + report preview before an import is confirmed (T8).
+    The report comes from parsing the file; the scale starts at the
+    meters-to-cm default and is editable here, before anything is
+    written. scale() returns the chosen value after accept()."""
+
+    def __init__(self, parent, report, scale=meshio_mod.DEFAULT_SCALE):
+        super().__init__(parent)
+        self.setWindowTitle("Import mesh")
+        layout = QtWidgets.QVBoxLayout(self)
+        summary = (f"{report['objects']} object(s) · "
+                   f"{report['triangles']:,} triangles")
+        layout.addWidget(QtWidgets.QLabel(summary))
+        warnings = report.get("warnings") or []
+        if warnings:
+            box = QtWidgets.QLabel("\n".join(warnings))
+            box.setWordWrap(True)
+            layout.addWidget(box)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("Scale (file units to cm):"))
+        self._scale_spin = QtWidgets.QDoubleSpinBox()
+        self._scale_spin.setRange(0.01, 10000.0)
+        self._scale_spin.setDecimals(2)
+        self._scale_spin.setValue(float(scale))
+        row.addWidget(self._scale_spin)
+        layout.addLayout(row)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def scale(self):
+        return self._scale_spin.value()
+
+
+class ExportDialog(QtWidgets.QDialog):
+    """Scale + report preview before an export is confirmed (T10
+    .obj, T11 .glb). Mirrors ImportDialog: the report comes from
+    planning the export (counts of what will actually be written,
+    warnings for skipped objects); the scale starts at the
+    cm-to-meters default and is editable here, before anything is
+    written. scale() returns the chosen value after accept(). The
+    title names the format; it defaults to .obj so the T10 callers
+    are untouched."""
+
+    def __init__(self, parent, report,
+                 scale=meshio_obj_mod.DEFAULT_EXPORT_SCALE,
+                 title="Export .obj"):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        layout = QtWidgets.QVBoxLayout(self)
+        summary = (f"{report['objects']} object(s) · "
+                   f"{report['triangles']:,} triangles")
+        layout.addWidget(QtWidgets.QLabel(summary))
+        warnings = report.get("warnings") or []
+        if warnings:
+            box = QtWidgets.QLabel("\n".join(warnings))
+            box.setWordWrap(True)
+            layout.addWidget(box)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("Scale (cm to file units):"))
+        self._scale_spin = QtWidgets.QDoubleSpinBox()
+        self._scale_spin.setRange(0.0001, 10000.0)
+        self._scale_spin.setDecimals(4)
+        self._scale_spin.setSingleStep(0.01)
+        self._scale_spin.setValue(float(scale))
+        row.addWidget(self._scale_spin)
+        layout.addLayout(row)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def scale(self):
+        return self._scale_spin.value()
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, scene=None, scene_path=None):
         super().__init__()
-        self.setWindowTitle("Light Engine — v0.1")
+        self.setWindowTitle("Reblend — v0.2")
         self.resize(1280, 800)
         self.scene = scene or new_scene()
         self.scene_path = scene_path
@@ -35,7 +120,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._play_timer = QtCore.QTimer(self)
         self._play_timer.timeout.connect(self._advance_frame)
         self._build_ui()
+        # A scene opened on the command line can carry mesh objects
+        # whose files are missing — resolve them before the viewport
+        # ever sees the scene. Warnings go to the status bar here
+        # (the window is not shown yet, so no dialog); _open_scene
+        # shows the dialog as well.
+        missing = self._resolve_meshes()
         self._apply_scene_to_ui()
+        if missing:
+            self.statusBar().showMessage(missing[0])
         self._update_play_timer()
 
     def closeEvent(self, event):
@@ -66,7 +159,15 @@ class MainWindow(QtWidgets.QMainWindow):
         for label, slot in (("New", self._new_scene),
                             ("Open…", self._open_scene),
                             ("Save", self._save_scene),
-                            ("Save As…", self._save_scene_as)):
+                            ("Save As…", self._save_scene_as),
+                            ("Import mesh…", self._import_mesh),
+                            ("Export mesh…", self._export_mesh),
+                            ("Export scene as .obj…",
+                             self._export_scene_obj),
+                            ("Export mesh as .glb…",
+                             self._export_mesh_glb),
+                            ("Export scene as .glb…",
+                             self._export_scene_glb)):
             action = QtGui.QAction(label, self)
             action.triggered.connect(slot)
             file_menu.addAction(action)
@@ -188,6 +289,15 @@ class MainWindow(QtWidgets.QMainWindow):
                                       "worn_leather"))
         self._texture_combo.currentTextChanged.connect(self._on_texture_changed)
         layout.addWidget(self._texture_combo)
+        self._smooth_check = QtWidgets.QCheckBox("Smooth shading")
+        self._smooth_check.toggled.connect(self._on_smooth_shading_changed)
+        layout.addWidget(self._smooth_check)
+        self._cast_check = QtWidgets.QCheckBox("Cast shadow")
+        self._cast_check.toggled.connect(self._on_cast_shadow_changed)
+        layout.addWidget(self._cast_check)
+        self._receive_check = QtWidgets.QCheckBox("Receive shadow")
+        self._receive_check.toggled.connect(self._on_receive_shadow_changed)
+        layout.addWidget(self._receive_check)
         layout.addStretch(1)
         return pane
 
@@ -221,8 +331,62 @@ class MainWindow(QtWidgets.QMainWindow):
         return bar
 
     # -- scene <-> UI -----------------------------------------------------
+    def _scene_base_path(self):
+        """Folder the scene was loaded from, or None for a fresh
+        unsaved scene. Mesh files resolve against this (T7)."""
+        if not self.scene_path:
+            return None
+        return os.path.dirname(os.path.abspath(self.scene_path))
+
+    def _resolve_meshes(self):
+        """Drop mesh objects whose asset file is missing or unreadable,
+        and return a list of plain warnings — one per dropped object,
+        each naming the file. The rest of the scene loads untouched;
+        a missing mesh is skipped, never faked. Pure scene work: it
+        does not show anything itself, so the caller decides how the
+        warnings are presented (status bar always, dialog on Open).
+        Saving never moves mesh files, so a scene saved into another
+        folder warns about its meshes on the next load — that is the
+        design, not a bug."""
+        warnings = []
+        base = self._scene_base_path()
+        kept = []
+        for obj in self.scene["objects"]:
+            if obj.get("shape") != "mesh":
+                kept.append(obj)
+                continue
+            name = obj.get("name") or obj["id"]
+            mesh_file = obj.get("mesh_file")
+            if not mesh_file:
+                warnings.append(
+                    f"Mesh object '{name}' has no mesh file, so it was "
+                    "skipped.")
+                continue
+            path = mesh_file if os.path.isabs(mesh_file) else (
+                os.path.join(base, mesh_file) if base else None)
+            if path is None or not os.path.isfile(path):
+                warnings.append(
+                    f"Mesh file not found: {mesh_file} — object "
+                    f"'{name}' was skipped.")
+                continue
+            try:
+                meshfile_mod.load_mesh(path)
+            except (OSError, ValueError) as exc:
+                warnings.append(
+                    f"Mesh file could not be read: {mesh_file} ({exc}) "
+                    f"— object '{name}' was skipped.")
+                continue
+            kept.append(obj)
+        if warnings:
+            self.scene["objects"] = kept
+            if self.selected_id and not find_object(self.scene,
+                                                    self.selected_id):
+                self.selected_id = None
+        return warnings
+
     def _apply_scene_to_ui(self):
-        self._viewport.set_scene(self.scene)
+        self._viewport.set_scene(self.scene,
+                                 base_path=self._scene_base_path())
         self._viewport.set_frame(self._frame)
         self._refresh_outliner()
         self._refresh_cameras()
@@ -263,6 +427,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._roughness_slider.setEnabled(enabled)
         self._metalness_slider.setEnabled(enabled)
         self._texture_combo.setEnabled(enabled)
+        # Smooth shading has no effect on a mesh object (T7): the
+        # asset's stored normals are used as-is, so the checkbox is
+        # disabled for meshes rather than silently ignored.
+        self._smooth_check.setEnabled(
+            enabled and (obj is None or obj.get("shape") != "mesh"))
+        self._cast_check.setEnabled(enabled)
+        self._receive_check.setEnabled(enabled)
         if obj is None:
             self._name_edit.setText("")
             self._refreshing = False
@@ -279,10 +450,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._texture_combo.setCurrentIndex(max(0, idx))
         color = mat.get("base_color", "#b0b0b0")
         self._color_swatch.setStyleSheet(f"background: {color};")
+        smooth = obj.get("smooth_shading",
+                         default_smooth_shading(obj.get("shape", "box")))
+        self._smooth_check.setChecked(bool(smooth))
+        self._cast_check.setChecked(bool(obj.get("cast_shadow", True)))
+        self._receive_check.setChecked(bool(obj.get("receive_shadow", True)))
         self._refreshing = False
 
     def _refresh_counts(self):
-        tris = total_triangles(self.scene)
+        # Mesh triangles come from the assets' recorded counts via
+        # the viewport cache (T7) — no vertex data is built to count.
+        tris = total_triangles(
+            self.scene,
+            mesh_counts=self._viewport.mesh_triangle_counts())
         self._tri_label.setText(f"{len(self.scene['objects'])} objects · "
                                 f"{tris:,} triangles")
         if tris > SOFT_TRI_BUDGET:
@@ -437,6 +617,39 @@ class MainWindow(QtWidgets.QMainWindow):
             obj.setdefault("material", {})["texture"] = text
             self._viewport.update()
 
+    def _on_smooth_shading_changed(self, checked):
+        if self._refreshing:
+            return
+        obj = find_object(self.scene, self.selected_id) if self.selected_id else None
+        if obj is None:
+            return
+        if obj.get("smooth_shading") != checked:
+            self._push_undo()
+            obj["smooth_shading"] = checked
+            self._viewport.update()
+
+    def _on_cast_shadow_changed(self, checked):
+        if self._refreshing:
+            return
+        obj = find_object(self.scene, self.selected_id) if self.selected_id else None
+        if obj is None:
+            return
+        if obj.get("cast_shadow", True) != checked:
+            self._push_undo()
+            obj["cast_shadow"] = checked
+            self._viewport.update()
+
+    def _on_receive_shadow_changed(self, checked):
+        if self._refreshing:
+            return
+        obj = find_object(self.scene, self.selected_id) if self.selected_id else None
+        if obj is None:
+            return
+        if obj.get("receive_shadow", True) != checked:
+            self._push_undo()
+            obj["receive_shadow"] = checked
+            self._viewport.update()
+
     def _pick_color(self):
         obj = find_object(self.scene, self.selected_id) if self.selected_id else None
         if obj is None:
@@ -503,8 +716,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scene_path = path
         self.selected_id = None
         self._frame = 0
+        missing = self._resolve_meshes()
         self._apply_scene_to_ui()
-        self.statusBar().showMessage(f"Opened {os.path.basename(path)}")
+        if missing:
+            self.statusBar().showMessage(missing[0])
+            QtWidgets.QMessageBox.warning(self, "Mesh files missing",
+                                          "\n".join(missing))
+        else:
+            self.statusBar().showMessage(f"Opened {os.path.basename(path)}")
 
     def _save_scene(self):
         if self.scene_path:
@@ -523,6 +742,209 @@ class MainWindow(QtWidgets.QMainWindow):
         save_scene(self.scene, path)
         self.scene_path = path
         self.statusBar().showMessage(f"Saved to {os.path.basename(path)}")
+
+    # -- mesh import (T8 .obj, T9 .glb) --------------------------------------
+    def import_mesh_objects(self, parsed, scale):
+        """Write a parsed import's assets and add its objects to the
+        scene. Dialog-free, so tests can drive it directly. One undo
+        step for the whole import (undo removes the objects; the
+        .mesh.json files stay on disk, which is fine — they are
+        harmless until a scene references them). Returns the created
+        objects, empty when the scene has no folder yet (assets live
+        next to the scene file) or when no asset could be written."""
+        base = self._scene_base_path()
+        if base is None:
+            return []
+        assets_dir = os.path.join(base, "assets")
+        try:
+            os.makedirs(assets_dir, exist_ok=True)
+        except OSError as exc:
+            self.statusBar().showMessage(
+                f"Could not make the assets folder: {exc}")
+            return []
+        objects = meshio_mod.build(parsed, scale)
+        stem = os.path.splitext(os.path.basename(parsed["source"]))[0]
+        used = set()
+        written = []
+        for item in objects:
+            filename = meshio_mod.unique_asset_name(
+                stem, item["name"], assets_dir, used)
+            path = os.path.join(assets_dir, filename)
+            try:
+                meshfile_mod.save_mesh(
+                    path, item["mesh"], source=parsed["source"],
+                    imported=datetime.now().isoformat(timespec="seconds"))
+            except OSError as exc:
+                self.statusBar().showMessage(
+                    f"Could not write {filename}: {exc}")
+                continue
+            written.append((item, filename))
+        if not written:
+            return []
+        self._push_undo()
+        created = []
+        for item, filename in written:
+            obj = new_object("mesh", name=item["name"],
+                             material=item["material"])
+            obj["mesh_file"] = f"assets/{filename}"
+            # .glb items carry their node transform (T9); .obj items
+            # do not, and keep the origin default.
+            for key in ("position", "rotation", "scale"):
+                if key in item:
+                    obj[key] = [float(v) for v in item[key]]
+            self.scene["objects"].append(obj)
+            created.append(obj)
+        self._refresh_outliner()
+        # The soft triangle budget is checked here (T8): the readout
+        # warns past it, never refuses — _refresh_counts does that
+        # for every scene change, imports included.
+        self._refresh_counts()
+        self._viewport.frame()
+        self._viewport.refresh()
+        self._select(created[0]["id"])
+        return created
+
+    def _import_mesh(self):
+        if self.scene_path is None:
+            QtWidgets.QMessageBox.information(
+                self, "Save the scene first",
+                "Imported meshes live in an assets folder next to the "
+                "scene file, so please save the scene first.")
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Import mesh", "", "Mesh files (*.obj *.glb)")
+        if not path:
+            return
+        try:
+            parsed = meshio_mod.parse(path)
+        except (OSError, ValueError) as exc:
+            QtWidgets.QMessageBox.warning(self, "Import failed", str(exc))
+            return
+        report = parsed["report"]
+        if meshio_mod.is_heavy(report["triangles"]):
+            answer = QtWidgets.QMessageBox.question(
+                self, "Heavy mesh",
+                f"This mesh has {report['triangles']:,} triangles — "
+                "this will be heavy on this machine. Import it anyway?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No)
+            if answer != QtWidgets.QMessageBox.Yes:
+                return
+        dialog = ImportDialog(self, report)
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        created = self.import_mesh_objects(parsed, dialog.scale())
+        if created:
+            self.statusBar().showMessage(
+                f"Imported {len(created)} object(s), "
+                f"{report['triangles']:,} triangles from "
+                f"{os.path.basename(path)}")
+            if report["warnings"]:
+                QtWidgets.QMessageBox.information(
+                    self, "Import warnings", "\n".join(report["warnings"]))
+        else:
+            self.statusBar().showMessage("Nothing was imported")
+
+    # -- mesh export (.obj T10, .glb T11) --------------------------------
+    def export_mesh_objects(self, objects, path, scale):
+        """Dialog-free export core: write the objects to path (.obj)
+        + the .mtl next to it, and return the report {objects,
+        triangles, warnings}. Tests drive it directly. Raises
+        OSError for an unwritable path — the menu slots turn that
+        into a plain warning dialog."""
+        return meshio_obj_mod.export_obj(
+            objects, path, scale=scale,
+            base_path=self._scene_base_path())
+
+    def export_glb_objects(self, objects, path, scale):
+        """Dialog-free export core: write the objects to path (.glb)
+        and return the report {objects, triangles, warnings}. The
+        .glb twin of export_mesh_objects; tests drive it directly.
+        Raises OSError for an unwritable path."""
+        return meshio_glb_mod.export_glb(
+            objects, path, scale=scale,
+            base_path=self._scene_base_path())
+
+    def _export_objects(self, objects, title, kind="obj"):
+        """File dialog + ExportDialog + write for one export. The
+        plan step resolves the geometry first, so the dialog shows
+        the real object/triangle counts and names any objects that
+        will be skipped (missing mesh files) before anything is
+        written. `kind` picks the format: "obj" (T10) or "glb"
+        (T11) — the file filter, the plan/write module, and the
+        dialog title follow it."""
+        if kind == "glb":
+            file_filter = "glTF Binary (*.glb)"
+            ext = ".glb"
+            dialog_title = "Export .glb"
+            plan_mod = meshio_glb_mod
+            write = self.export_glb_objects
+        else:
+            file_filter = "Wavefront OBJ (*.obj)"
+            ext = ".obj"
+            dialog_title = "Export .obj"
+            plan_mod = meshio_obj_mod
+            write = self.export_mesh_objects
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, title, "", file_filter)
+        if not path:
+            return
+        if not path.endswith(ext):
+            path += ext
+        _items, plan = plan_mod.plan_export(
+            objects, base_path=self._scene_base_path())
+        dialog = ExportDialog(self, plan, title=dialog_title)
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        try:
+            report = write(objects, path, dialog.scale())
+        except (OSError, ValueError) as exc:
+            QtWidgets.QMessageBox.warning(self, "Export failed", str(exc))
+            return
+        self.statusBar().showMessage(
+            f"Exported {report['objects']} object(s), "
+            f"{report['triangles']:,} triangles to "
+            f"{os.path.basename(path)}")
+        # The plan's warnings were already shown in the dialog; only
+        # new ones (something changed between the dialog and the
+        # write) get a second dialog.
+        shown = set(plan["warnings"])
+        new = [w for w in report["warnings"] if w not in shown]
+        if new:
+            QtWidgets.QMessageBox.information(self, "Export warnings",
+                                              "\n".join(new))
+
+    def _export_mesh(self):
+        obj = find_object(self.scene, self.selected_id) \
+            if self.selected_id else None
+        if obj is None:
+            self.statusBar().showMessage("Select an object first")
+            return
+        self._export_objects([obj], "Export mesh")
+
+    def _export_scene_obj(self):
+        if not self.scene["objects"]:
+            self.statusBar().showMessage(
+                "Nothing to export — the scene is empty")
+            return
+        self._export_objects(self.scene["objects"],
+                             "Export scene as .obj")
+
+    def _export_mesh_glb(self):
+        obj = find_object(self.scene, self.selected_id) \
+            if self.selected_id else None
+        if obj is None:
+            self.statusBar().showMessage("Select an object first")
+            return
+        self._export_objects([obj], "Export mesh as .glb", kind="glb")
+
+    def _export_scene_glb(self):
+        if not self.scene["objects"]:
+            self.statusBar().showMessage(
+                "Nothing to export — the scene is empty")
+            return
+        self._export_objects(self.scene["objects"],
+                             "Export scene as .glb", kind="glb")
 
     # -- render / export --------------------------------------------------------
     def _render_still(self):

@@ -10,6 +10,15 @@ import math
 
 TEXTURE_NAMES = ("none", "wood_grain", "brushed_metal", "worn_leather")
 
+# Default wood-grain strength (T6). 1.0 is the v0.1 look: the rings
+# were too strong and wavy on big flat planes. 0.5 still read as wavy
+# stripes on the floor in the screenshot, so the default is 0.3 — the
+# grain reads as wood without dominating the surface. The strength
+# scales only the deviation from the base brightness, so the mean
+# color is unchanged. Per-material tuning is a later item — there is
+# no UI for this yet.
+WOOD_GRAIN_STRENGTH = 0.3
+
 
 def _hash(x, y, seed):
     # Deterministic integer hash in [0, 1). No Random objects: build_qimage
@@ -34,13 +43,17 @@ def _smooth_noise(u, v, cells, seed):
     return (a * (1 - sx) + b * sx) * (1 - sy) + (c * (1 - sx) + d * sx) * sy
 
 
-def pattern_factor(name, u, v):
-    """Brightness factor in roughly [0.7, 1.15] for a pattern at (u, v)."""
+def pattern_factor(name, u, v, wood_strength=WOOD_GRAIN_STRENGTH):
+    """Brightness factor in roughly [0.7, 1.15] for a pattern at (u, v).
+
+    wood_strength scales the wood-grain deviation only (1.0 = the old
+    v0.1 look); the other patterns ignore it.
+    """
     if name == "wood_grain":
         rings = math.sin((u * 14.0 + _smooth_noise(u, v, 3, 7) * 3.0)
                          * math.pi * 2.0)
         grain = _smooth_noise(u * 2.0, v * 24.0, 4, 11)
-        return 0.88 + 0.10 * rings + 0.08 * (grain - 0.5)
+        return 0.88 + wood_strength * (0.10 * rings + 0.08 * (grain - 0.5))
     if name == "brushed_metal":
         streak = _smooth_noise(u * 40.0, v * 2.0, 6, 3)
         fine = _smooth_noise(u, v, 24, 5)
@@ -52,12 +65,13 @@ def pattern_factor(name, u, v):
     return 1.0
 
 
-def pattern_rgb(name, u, v, base_rgb):
-    f = pattern_factor(name, u, v)
+def pattern_rgb(name, u, v, base_rgb, wood_strength=WOOD_GRAIN_STRENGTH):
+    f = pattern_factor(name, u, v, wood_strength)
     return tuple(max(0.0, min(1.0, c * f)) for c in base_rgb)
 
 
-def build_qimage(name, base_rgb, size=256):
+def build_qimage(name, base_rgb, size=256,
+                 wood_strength=WOOD_GRAIN_STRENGTH):
     """Render a pattern to a QImage (Qt import kept local so the pure
     pattern functions stay testable without Qt)."""
     from PySide6.QtGui import QImage, qRgb
@@ -66,6 +80,6 @@ def build_qimage(name, base_rgb, size=256):
         v = y / max(1, size - 1)
         for x in range(size):
             u = x / max(1, size - 1)
-            r, g, b = pattern_rgb(name, u, v, base_rgb)
+            r, g, b = pattern_rgb(name, u, v, base_rgb, wood_strength)
             img.setPixel(x, y, qRgb(int(r * 255), int(g * 255), int(b * 255)))
     return img

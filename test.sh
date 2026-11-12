@@ -1,7 +1,7 @@
 #!/bin/sh
-# Light Engine v0.1 tests. Run:  sh test.sh
+# Reblend v0.2 tests. Run:  bash test.sh
 # Core tests run headless. Set LIGHT_ENGINE_QT_TESTS=1 to also run the
-# viewport tests (needs a display: use xvfb-run -a sh test.sh).
+# viewport tests (needs a display: use xvfb-run -a bash test.sh).
 cd "$(dirname "$0")"
 if [ -x ".venv/bin/python" ]; then
   PY=".venv/bin/python"

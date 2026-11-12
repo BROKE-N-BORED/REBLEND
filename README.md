@@ -15,11 +15,11 @@ tracing.
 ## Install and run
 
 ```
-sh install.sh
-sh run.sh
+bash install.sh
+bash run.sh
 ```
 
-`sh run.sh --scene path/to/scene.json` opens a scene file. With no scene
+`bash run.sh --scene path/to/scene.json` opens a scene file. With no scene
 given, the example tabletop scene opens.
 
 ## Controls
@@ -30,8 +30,10 @@ given, the example tabletop scene opens.
   the selected object's material. Duplicate / Delete act on the selection.
 - Timeline: Play / Pause, scrub the slider, Add key / Delete key store
   the selected object's transform at the current frame.
-- File menu: New, Open, Save, Render still to PNG, Export frames to
-  a folder (one PNG per frame).
+- File menu: New, Open, Save, Import mesh (.obj / .glb), Export mesh,
+  Export scene as .obj, Export mesh as .glb, Export scene as .glb,
+  Render still to PNG, Export frames to a folder (one PNG per
+  frame).
 - Edit menu: Undo (up to 50 steps).
 
 ## Scene format
@@ -53,15 +55,14 @@ size: the warning is information only.
 ## Tests
 
 ```
-sh test.sh
+bash test.sh
 ```
 
 Core tests run headless. The viewport tests need a display and run when
-`LIGHT_ENGINE_QT_TESTS=1` is set (under Xvfb: `xvfb-run -a sh test.sh`).
+`LIGHT_ENGINE_QT_TESTS=1` is set (under Xvfb: `xvfb-run -a bash test.sh`).
 
 ## What v0.1 does not do yet
 
-- No mesh import or export (no .obj / .glb yet).
 - No sculpting, no physics, no particles.
 - No video export (PNG frame sequences only).
 - No gizmo dragging in the viewport (transforms are numeric).

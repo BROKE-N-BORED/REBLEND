@@ -1,0 +1,26 @@
+REBLEND v0.2 — T11 (mesh import/export) — Linux Mint
+
+TO INSTALL — double-click "Install Reblend" in this folder.
+- If Mint asks about trust, click "Trust and Launch" (or "Mark as
+  Trusted", then double-click it again).
+- The installer copies Reblend to ~/.local/share/reblend, downloads
+  its interface library (about 100 MB, a few minutes on first
+  install), and adds "Reblend" to the app menu under Graphics.
+  No terminal needed.
+- If anything fails, the installer names its log file. The full log
+  is at /tmp/reblend-install.log.
+
+TO RUN — open the app menu and search for Reblend, or look under
+Graphics. Or run `reblend` in a terminal.
+
+TO UNINSTALL — double-click "uninstall-reblend.sh". Your scenes
+are kept — they live where you saved them.
+
+WHAT'S IN THIS RELEASE (T1–T11) — OpenGL 3.3 shaders, VAOs and
+index buffers, smooth normals, PBR-lite materials with ACES tone
+mapping, one shadow map, scene format v2, and mesh import/export:
+.obj and .glb both ways. See CHANGELOG.md for the full list.
+
+NOTE — the cube icon in this release is provisional. The Reblend
+logo has not been picked yet; the icon will be replaced with the
+real mark when it is.

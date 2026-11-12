@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Install Reblend
+Comment=Install Reblend v0.2 — T11 — adds Reblend to the app menu, no terminal needed
+Exec=python3 -c "import os,sys,subprocess; d = os.path.dirname(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1] else os.getcwd(); sys.exit(subprocess.call(['bash', os.path.join(d, 'install-reblend.sh')]))" %k
+Icon=system-software-install
+Terminal=false
+Categories=System;

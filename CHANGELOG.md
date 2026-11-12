@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2 (in progress)
+
+- T11 — .glb export: File > Export mesh as .glb (selected object) and File > Export scene as .glb write a minimal glTF 2.0 binary file (stdlib `struct` + `json`): one scene, one node per object, one mesh per object, one primitive per mesh, non-interleaved bufferViews. Vertices stay in the object's local space and the transform rides on the node as TRS (translation / rotation quaternion / scale), conjugated into Y-up meters, so a re-import restores the object's own position/rotation/scale. Materials carry baseColorFactor, metallicFactor, and roughnessFactor — roughness and metalness survive the round-trip (unlike .obj); only procedural textures are lost. Export scale defaults to 0.01 (cm to m), editable in the export dialog. The tavern exports and re-imports as the same 19 objects and 1,674 triangles, transforms and materials exact. Also fixed in the T9 importer: component type 5123 (UNSIGNED_SHORT) was read as 4 bytes, which misread real-world 16-bit index lists (Blender writes them for small meshes). 183 tests passing.
+
+- T10 — .obj export: File > Export mesh (selected object) and File > Export scene as .obj write an .obj + .mtl pair (Kd base colors, one material per distinct color). Vertices are de-indexed on write and go through each object's world transform (position, rotation, scale); normals go through the inverse-transpose, so non-uniform scale stays correct. Export scale defaults to 0.01 (cm to m), editable in the export dialog, so export-then-import round-trips the geometry: the tavern exports and re-imports as the same 19 objects and 1,674 triangles. Missing mesh assets warn naming the file and are skipped; nothing selected or an empty scene says so plainly. 160 tests passing.
+
+- T9 — .glb import: File > Import mesh reads glTF 2.0 binary files (stdlib `struct` + `json`). One mesh primitive becomes one object; node transforms land on the object's own position/rotation/scale (baked into the vertices only for shear, reflection, or zero scale); baseColorFactor, metallicFactor, and roughnessFactor map to the material; Y-up meters convert to Z-up cm. Skins, animations, cameras, lights, and textures are skipped with a warning, never fatal. Sample: examples/sample.glb (red crate + teal pyramid, 18 triangles). 141 tests passing.
+
 ## v0.1 — 2026-11-12
 
 First version. Native Qt + OpenGL window with still scenes, modeling, and animation. 6 primitives, PBR-lite materials, 3 procedural textures, named cameras, PNG stills, outliner + click-select, numeric transforms, 50-step undo, timeline keyframes, PNG frame export. Example tavern scene included. 33 tests passing.

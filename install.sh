@@ -1,5 +1,5 @@
 #!/bin/sh
-# Light Engine v0.1 installer. Run:  sh install.sh
+# Reblend v0.2 installer. Run:  bash install.sh
 # Checks Python >= 3.10, creates a virtualenv, installs PySide6_Essentials
 # (Qt Widgets + OpenGL only — no WebEngine, no PDF; the full PySide6
 # metapackage pulls a 116 MB web engine this app never uses).
@@ -11,14 +11,14 @@ check_only=0
 if [ "$1" = "--check" ]; then check_only=1; fi
 
 if ! command -v python3 >/dev/null 2>&1; then
-  echo "Python 3 is not installed. Install it first, then run sh install.sh again."
+  echo "Python 3 is not installed. Install it first, then run bash install.sh again."
   exit 1
 fi
 
 py_ok=$(python3 -c "import sys; print(1 if sys.version_info >= (3, 10) else 0)")
 if [ "$py_ok" != "1" ]; then
   python3 --version
-  echo "Light Engine needs Python 3.10 or newer."
+  echo "Reblend needs Python 3.10 or newer."
   exit 1
 fi
 
@@ -35,7 +35,7 @@ if [ -d ".venv" ] && [ -x ".venv/bin/python" ]; then
   if .venv/bin/python -c "import PySide6" 2>/dev/null; then
     echo "PySide6: installed ($(.venv/bin/python -c "import PySide6; print(PySide6.__version__)"))"
     if [ "$check_only" = "1" ]; then exit 0; fi
-    echo "Already installed. Run it with:  sh run.sh"
+    echo "Already installed. Run it with:  bash run.sh"
     exit 0
   else
     echo "PySide6: missing"
@@ -55,4 +55,4 @@ echo "Installing PySide6_Essentials (this downloads once)..."
 
 echo "Checking the install..."
 .venv/bin/python -m unittest discover -s tests -v 2>&1 | tail -3
-echo "Done. Run it with:  sh run.sh"
+echo "Done. Run it with:  bash run.sh"

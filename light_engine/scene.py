@@ -1,11 +1,19 @@
 """Scene data: JSON format, defaults, save/load. No Qt here.
 
-Scene JSON:
+Scene JSON (format v2, T6):
   {
-    "name": "...", "version": 1,
+    "name": "...", "version": 2,
     "objects": [ { "id", "name", "shape", "params",
+                   "kind": "object" | "emitter" (default "object"; emitters
+                           are T16 — the v2 loader only preserves the field),
+                   "mesh_file": "assets/....mesh.json" (mesh objects, T7;
+                           geometry comes from that asset file — see
+                           meshfile.py for the .mesh.json schema),
                    "position": [x, y, z], "rotation": [rx, ry, rz] (degrees),
                    "scale": [sx, sy, sz],
+                   "smooth_shading": true|false (default by shape, T3),
+                   "cast_shadow": true|false (default true, T5),
+                   "receive_shadow": true|false (default true, T5),
                    "material": { "base_color": "#rrggbb", "roughness": 0..1,
                                  "metalness": 0..1,
                                  "texture": "none" | "wood_grain" |
@@ -14,16 +22,21 @@ Scene JSON:
     "lights":  [ { "name", "kind": "key"|"fill"|"rim"|"ambient",
                    "position": [x, y, z], "color": "#rrggbb",
                    "intensity": 0..1 } ],
+    "physics": { object_id: { ... } } (T18 — preserved, not used yet),
     "animation": { "fps": 24, "end_frame": 48,
                    "keys": { object_id: { "position": [[frame, [x,y,z]], ...],
                                           "rotation": [...], "scale": [...] } } }
   }
-Units are cm, z-up. Loading is tolerant: missing fields get defaults.
+Units are cm, z-up. Loading is tolerant: missing fields get defaults,
+and v1 scenes load with defaults for every new field (smooth normals
+on for curved primitives, shadows on, kind "object"). Save always
+writes v2; no v1 writer is kept.
 """
 from __future__ import annotations
 
 import copy
 import json
+import os
 import uuid
 
 from .geometry import default_params
@@ -31,6 +44,14 @@ from .geometry import default_params
 TEXTURES = ("none", "wood_grain", "brushed_metal", "worn_leather")
 MATERIAL_DEFAULTS = {"base_color": "#b0b0b0", "roughness": 0.6,
                      "metalness": 0.0, "texture": "none"}
+# Shapes that default to smooth shading (T3): curved primitives.
+# Box and plane default flat, so their edges stay crisp.
+SMOOTH_SHAPES = ("sphere", "cylinder", "cone", "torus")
+
+
+def default_smooth_shading(shape):
+    """Smooth shading default for a shape."""
+    return shape in SMOOTH_SHAPES
 
 
 def default_material(overrides=None):
@@ -55,6 +76,10 @@ def new_object(shape, name=None, position=None, params=None, material=None):
         "position": list(position or [0.0, 0.0, 0.0]),
         "rotation": [0.0, 0.0, 0.0],
         "scale": [1.0, 1.0, 1.0],
+        "kind": "object",
+        "smooth_shading": default_smooth_shading(shape),
+        "cast_shadow": True,
+        "receive_shadow": True,
         "material": default_material(material),
     }
     return obj
@@ -76,7 +101,7 @@ def default_lights():
 def new_scene(name="Untitled"):
     return {
         "name": name,
-        "version": 1,
+        "version": 2,
         "objects": [],
         "cameras": [],
         "lights": default_lights(),
@@ -92,6 +117,27 @@ def normalize_object(raw):
                      params=raw.get("params"),
                      material=raw.get("material"))
     obj["id"] = str(raw.get("id") or obj["id"])
+    # kind is a v2 field (T6): "object" or "emitter" (emitters are T16;
+    # the loader only accepts and preserves the value). Anything else
+    # — including a v1 file with no kind at all — means "object".
+    if raw.get("kind") in ("object", "emitter"):
+        obj["kind"] = raw["kind"]
+    # mesh_file is a v2 field (T7): preserved if it is a string, so a
+    # scene round-trips intact. The viewport resolves it against the
+    # scene's folder and renders the asset; the window drops a mesh
+    # object whose file is missing (warns, never fakes).
+    if isinstance(raw.get("mesh_file"), str) and raw["mesh_file"]:
+        obj["mesh_file"] = raw["mesh_file"]
+    # smooth_shading is additive (T3): a real bool in the file wins,
+    # a missing or mistyped value keeps the shape default from
+    # new_object.
+    if isinstance(raw.get("smooth_shading"), bool):
+        obj["smooth_shading"] = raw["smooth_shading"]
+    # cast_shadow / receive_shadow are additive the same way (T5):
+    # a real bool wins, anything else keeps the True default.
+    for flag in ("cast_shadow", "receive_shadow"):
+        if isinstance(raw.get(flag), bool):
+            obj[flag] = raw[flag]
     for key in ("rotation", "scale"):
         try:
             vals = [float(v) for v in raw.get(key, obj[key])]
@@ -110,9 +156,15 @@ def normalize_object(raw):
 
 def normalize_scene(raw):
     scene = new_scene(raw.get("name", "Untitled"))
-    scene["version"] = 1
+    # Format v2 (T6): every scene loads as v2, including v1 files —
+    # the new fields get their defaults in normalize_object.
+    scene["version"] = 2
     scene["objects"] = [normalize_object(o) for o in raw.get("objects", [])
                         if isinstance(o, dict)]
+    # physics is a v2 section (T18): preserved as-is so a scene
+    # round-trips intact; nothing reads it yet.
+    if isinstance(raw.get("physics"), dict):
+        scene["physics"] = copy.deepcopy(raw["physics"])
     cams = []
     for cam in raw.get("cameras", []) or []:
         if not isinstance(cam, dict) or not cam.get("name"):
@@ -148,8 +200,13 @@ def load_scene(path):
 
 
 def save_scene(scene, path):
+    # Save always writes v2 (T6); no v1 writer is kept. The version is
+    # forced on a shallow copy so a hand-built scene dict can never
+    # write a v1 file, and the caller's dict is not mutated.
+    data = dict(scene)
+    data["version"] = 2
     with open(path, "w", encoding="utf-8") as fh:
-        json.dump(scene, fh, indent=2)
+        json.dump(data, fh, indent=2)
 
 
 def scene_copy(scene):
@@ -171,12 +228,32 @@ def hex_to_rgb(value):
         return (0.7, 0.7, 0.7)
 
 
-def total_triangles(scene):
-    """Triangle count for the whole scene (tessellates in memory, cheap
-    at these sizes; the viewport caches the result in GPU buffers)."""
+def total_triangles(scene, base_path=None, mesh_counts=None):
+    """Triangle count for the whole scene (primitives tessellate in
+    memory, cheap at these sizes; the viewport caches the result in
+    GPU buffers). Mesh objects count from the asset's RECORDED
+    triangle_count, without building any vertex data (v2 spec):
+    mesh_counts maps object id -> count when the caller already has
+    the assets loaded (the viewport cache); otherwise, with
+    base_path, the count is read from the asset file. Without either
+    source a mesh counts 0 — never a tessellated guess."""
     from .geometry import tessellate
+    from .meshfile import read_counts
     total = 0
     for obj in scene["objects"]:
+        if obj.get("shape") == "mesh":
+            if mesh_counts is not None and obj["id"] in mesh_counts:
+                total += mesh_counts[obj["id"]]
+            elif base_path and obj.get("mesh_file"):
+                path = obj["mesh_file"]
+                if not os.path.isabs(path):
+                    path = os.path.join(base_path, path)
+                try:
+                    _verts, tris = read_counts(path)
+                    total += tris
+                except (OSError, ValueError):
+                    pass
+            continue
         total += tessellate(obj["shape"], obj.get("params", {})).get(
             "tri_count", 0)
     return total

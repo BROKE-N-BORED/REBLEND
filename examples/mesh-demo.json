@@ -1,0 +1,177 @@
+{
+  "name": "Mesh demo",
+  "version": 2,
+  "objects": [
+    {
+      "id": "floor",
+      "name": "Floor",
+      "shape": "plane",
+      "params": {
+        "size": [
+          600.0,
+          600.0
+        ]
+      },
+      "position": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kind": "object",
+      "smooth_shading": false,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#6b5a44",
+        "roughness": 0.9,
+        "metalness": 0.0,
+        "texture": "wood_grain"
+      }
+    },
+    {
+      "id": "gem",
+      "name": "Gem",
+      "shape": "mesh",
+      "params": {},
+      "position": [
+        0.0,
+        0.0,
+        60.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kind": "object",
+      "smooth_shading": false,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#3fb8a8",
+        "roughness": 0.2,
+        "metalness": 0.3,
+        "texture": "none"
+      },
+      "mesh_file": "assets/gem.mesh.json"
+    },
+    {
+      "id": "crate",
+      "name": "Crate",
+      "shape": "box",
+      "params": {
+        "size": [
+          60.0,
+          60.0,
+          60.0
+        ]
+      },
+      "position": [
+        150.0,
+        0.0,
+        30.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kind": "object",
+      "smooth_shading": false,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#8a5a2b",
+        "roughness": 0.7,
+        "metalness": 0.0,
+        "texture": "wood_grain"
+      }
+    }
+  ],
+  "cameras": [
+    {
+      "name": "Overview",
+      "position": [
+        320.0,
+        -320.0,
+        260.0
+      ],
+      "look_at": [
+        0.0,
+        0.0,
+        40.0
+      ]
+    }
+  ],
+  "lights": [
+    {
+      "name": "Key",
+      "kind": "key",
+      "position": [
+        -300.0,
+        -300.0,
+        400.0
+      ],
+      "color": "#ffffff",
+      "intensity": 0.9
+    },
+    {
+      "name": "Fill",
+      "kind": "fill",
+      "position": [
+        300.0,
+        -200.0,
+        150.0
+      ],
+      "color": "#cfe0ff",
+      "intensity": 0.45
+    },
+    {
+      "name": "Rim",
+      "kind": "rim",
+      "position": [
+        0.0,
+        400.0,
+        250.0
+      ],
+      "color": "#ffe8c8",
+      "intensity": 0.5
+    },
+    {
+      "name": "Ambient",
+      "kind": "ambient",
+      "position": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "color": "#ffffff",
+      "intensity": 0.35
+    }
+  ],
+  "animation": {
+    "fps": 24,
+    "end_frame": 48,
+    "keys": {}
+  }
+}

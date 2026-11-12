@@ -11,6 +11,16 @@ Every builder returns a dict:
   uvs:       flat list of floats, 2 per vertex
   tri_count: number of triangles
 Geometry is centred on the origin; the object transform places it.
+
+tessellate_indexed returns the same triangles in indexed form: shared
+vertices plus a triangle index list (indices: flat list of ints, 3 per
+triangle). Vertices that share a position and uv are welded into one,
+with their face normals averaged and re-normalized — but only across
+faces whose normals are within SMOOTH_ANGLE_DEGREES of each other, so
+curved primitives come out smooth-shaded while box corners and
+cylinder cap edges keep their crisp edges. The indexed form is what
+smooth-shaded objects (T3), mesh import, and sculpting use; flat
+objects keep the soup by default.
 """
 from __future__ import annotations
 
@@ -31,6 +41,12 @@ def _normal(a, b, c):
     if length < 1e-9:
         return (0.0, 0.0, 1.0)
     return (nx / length, ny / length, nz / length)
+
+
+def face_normal(a, b, c):
+    """Unit normal of the triangle (a, b, c). The importers use this
+    for files that carry no normals (T8)."""
+    return _normal(a, b, c)
 
 
 class _Soup:
@@ -183,6 +199,87 @@ def tessellate(shape: str, params: dict | None = None) -> dict:
     return builder(dict(params or {}))
 
 
+# Smoothing angle for the weld: face normals closer than this share
+# one vertex and average; wider angles get separate vertices, so
+# crisp edges survive the indexed path. 45 degrees: the default
+# torus turns 36 degrees per side step, so it still welds smooth —
+# a 30-degree threshold would leave it faceted. Box edges are 90
+# degrees, so they never weld (T2's weld had no threshold and
+# softened 4 of the 24 box corners where two faces share a uv).
+SMOOTH_ANGLE_DEGREES = 45.0
+_SMOOTH_COS = math.cos(math.radians(SMOOTH_ANGLE_DEGREES))
+
+
+def _weld(soup: dict) -> dict:
+    """Weld soup vertices that share a position and uv into shared
+    vertices, averaging their face normals — but only across faces
+    whose normals are within SMOOTH_ANGLE_DEGREES of the group's
+    first normal. Wider edges get their own vertex, so a box keeps
+    all 24 crisp corners. Index order follows soup order, so
+    triangle i of the indexed mesh is triangle i of the soup.
+    Vertex keys use exact float equality: shared corners come from
+    the same computed points, so their floats are identical."""
+    pos, nor, uv = soup["positions"], soup["normals"], soup["uvs"]
+    verts = len(pos) // 3
+    # key -> list of [vertex index, seed normal (nx, ny, nz)]
+    groups_of = {}
+    positions: list[float] = []
+    uvs: list[float] = []
+    normal_sums: list[list[float]] = []
+    indices: list[int] = []
+    for i in range(verts):
+        key = (pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2],
+               uv[i * 2], uv[i * 2 + 1])
+        nx, ny, nz = nor[i * 3], nor[i * 3 + 1], nor[i * 3 + 2]
+        groups = groups_of.get(key)
+        idx = None
+        if groups is not None:
+            for g_idx, (sx, sy, sz) in groups:
+                if nx * sx + ny * sy + nz * sz >= _SMOOTH_COS:
+                    idx = g_idx
+                    break
+        if idx is None:
+            idx = len(positions) // 3
+            if groups is None:
+                groups_of[key] = [(idx, (nx, ny, nz))]
+            else:
+                groups.append((idx, (nx, ny, nz)))
+            positions.extend((pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]))
+            uvs.extend((uv[i * 2], uv[i * 2 + 1]))
+            normal_sums.append([nx, ny, nz])
+        else:
+            s = normal_sums[idx]
+            s[0] += nx
+            s[1] += ny
+            s[2] += nz
+        indices.append(idx)
+    normals: list[float] = []
+    for s in normal_sums:
+        length = math.sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2])
+        if length < 1e-9:
+            normals.extend((0.0, 0.0, 1.0))
+        else:
+            normals.extend((s[0] / length, s[1] / length, s[2] / length))
+    return {"positions": positions, "normals": normals, "uvs": uvs,
+            "indices": indices, "tri_count": soup["tri_count"]}
+
+
+def tessellate_indexed(shape: str, params: dict | None = None) -> dict:
+    """Indexed mesh for one primitive: shared vertices + triangle index
+    list. Same triangles as tessellate(), fewer vertices. Unknown
+    shapes -> box, as with tessellate."""
+    return _weld(tessellate(shape, params))
+
+
+def weld_soup(soup: dict) -> dict:
+    """Weld a triangle soup into an indexed mesh: shared vertices +
+    triangle index list, with face normals averaged across faces
+    within SMOOTH_ANGLE_DEGREES (see _weld). The importers use this
+    for files that carry no normals (T8): the soup's per-face normals
+    become smooth normals, and crisp edges stay crisp."""
+    return _weld(soup)
+
+
 def default_params(shape: str) -> dict:
     if shape == "box":
         return {"size": [100.0, 100.0, 100.0]}
@@ -197,6 +294,10 @@ def default_params(shape: str) -> dict:
     if shape == "torus":
         return {"major_radius": 50.0, "minor_radius": 20.0,
                 "segments": 24, "sides": 10}
+    if shape == "mesh":
+        # Mesh geometry comes from the asset file (T7); params are
+        # unused, so a mesh object carries an empty dict.
+        return {}
     return {"size": [100.0, 100.0, 100.0]}
 
 

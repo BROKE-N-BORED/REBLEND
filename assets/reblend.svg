@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+<!-- Provisional Reblend icon: a plain isometric cube, drawn in code. -->
+<!-- NOT the Reblend logo — Joshua has not picked a logo yet. -->
+<polygon points="128,44 204,88 128,132 52,88" fill="#e8e4da" stroke="#2b333b" stroke-width="3" stroke-linejoin="round"/>
+<polygon points="52,88 128,132 128,220 52,176" fill="#8a9aa8" stroke="#2b333b" stroke-width="3" stroke-linejoin="round"/>
+<polygon points="128,132 204,88 204,176 128,220" fill="#44525e" stroke="#2b333b" stroke-width="3" stroke-linejoin="round"/>
+</svg>

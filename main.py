@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Light Engine v0.1 entry point. Usage:
+"""Reblend v0.2 entry point. Usage:
   python3 main.py [--scene path/to/scene.json]
 With no scene given, the example tabletop scene opens.
 """
@@ -16,7 +16,7 @@ from light_engine.scene import load_scene, new_scene  # noqa: E402
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Light Engine v0.1")
+    parser = argparse.ArgumentParser(description="Reblend v0.2")
     parser.add_argument("--scene", default=None,
                         help="Scene JSON file to open")
     args = parser.parse_args(argv)
@@ -24,8 +24,8 @@ def main(argv=None):
         from PySide6 import QtWidgets
         from light_engine.window import MainWindow
     except ImportError as exc:
-        print("Light Engine needs PySide6, and it is not installed here.")
-        print("Run:  sh install.sh")
+        print("Reblend needs PySide6, and it is not installed here.")
+        print("Run:  bash install.sh")
         print(f"(import error was: {exc})")
         return 2
     scene = None
@@ -47,7 +47,7 @@ def main(argv=None):
     if scene is None:
         scene = new_scene()
     app = QtWidgets.QApplication(sys.argv)
-    app.setApplicationName("Light Engine")
+    app.setApplicationName("Reblend")
     window = MainWindow(scene=scene, scene_path=scene_path)
     window.show()
     return app.exec()
