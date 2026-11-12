@@ -1,0 +1,68 @@
+# Reblend
+
+A lightweight 3D app for Linux: still scenes, modeling, and animation in
+one native desktop window. Built for low-spec machines: geometry is
+tessellated once and kept in GPU vertex buffers, rendering is a
+fixed-function rasterizer with PBR-lite materials, and there is no path
+tracing.
+
+## Requirements
+
+- Linux, Python 3.10 or newer
+- PySide6_Essentials (installed by `install.sh` into a local virtualenv)
+- No other dependencies. No network use at runtime.
+
+## Install and run
+
+```
+sh install.sh
+sh run.sh
+```
+
+`sh run.sh --scene path/to/scene.json` opens a scene file. With no scene
+given, the example tabletop scene opens.
+
+## Controls
+
+- Left-drag: orbit. Right-drag: pan. Scroll: zoom.
+- Click an object: select it. Frame button: fit the view to the scene.
+- Add panel: add a primitive. Inspector: move, rotate, scale, and edit
+  the selected object's material. Duplicate / Delete act on the selection.
+- Timeline: Play / Pause, scrub the slider, Add key / Delete key store
+  the selected object's transform at the current frame.
+- File menu: New, Open, Save, Render still to PNG, Export frames to
+  a folder (one PNG per frame).
+- Edit menu: Undo (up to 50 steps).
+
+## Scene format
+
+Scenes are JSON files: objects (shape, size, position, rotation, scale,
+material), cameras (name, position, look at), lights (key / fill / rim /
+ambient), and animation (frames per second, end frame, keyframes).
+Shapes: box, sphere, cylinder, cone, torus, plane. Materials carry a
+base color, roughness, metalness, and one procedural texture
+(none, wood_grain, brushed_metal, worn_leather). Procedural textures are
+generated in code; no image files are used.
+
+## Budgets
+
+The status line shows the object count and triangle count. Past a soft
+100,000-triangle budget a warning appears. Nothing is ever blocked for
+size: the warning is information only.
+
+## Tests
+
+```
+sh test.sh
+```
+
+Core tests run headless. The viewport tests need a display and run when
+`LIGHT_ENGINE_QT_TESTS=1` is set (under Xvfb: `xvfb-run -a sh test.sh`).
+
+## What v0.1 does not do yet
+
+- No mesh import or export (no .obj / .glb yet).
+- No sculpting, no physics, no particles.
+- No video export (PNG frame sequences only).
+- No gizmo dragging in the viewport (transforms are numeric).
+- No shader-based rendering (fixed-function OpenGL 2.1).
