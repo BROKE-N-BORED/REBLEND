@@ -11,6 +11,8 @@ tracing.
 - Linux, Python 3.10 or newer
 - PySide6_Essentials (installed by `install.sh` into a local virtualenv)
 - No other dependencies. No network use at runtime.
+- Video export needs ffmpeg installed (`sudo apt install ffmpeg`);
+  everything else works without it.
 
 ## Install and run
 
@@ -40,7 +42,8 @@ given, the example tabletop scene opens.
 - File menu: New, Open, Save, Import mesh (.obj / .glb), Export mesh,
   Export scene as .obj, Export mesh as .glb, Export scene as .glb,
   Render still to PNG, Export frames to a folder (one PNG per
-  frame).
+  frame), Export video (MP4 / WebM via ffmpeg, with a progress
+  bar and Cancel; a cancelled export leaves no file).
 - Edit menu: Undo / Redo (up to 50 steps each).
 
 ## Scene format

@@ -27,6 +27,7 @@ from light_engine import meshio_obj  # noqa: E402
 from light_engine import scene as scene_mod  # noqa: E402
 from light_engine import shaders  # noqa: E402
 from light_engine import textures  # noqa: E402
+from light_engine import video as video_mod  # noqa: E402
 
 import glb_fixture  # noqa: E402
 
@@ -64,6 +65,7 @@ def _sample_glb_path():
 
 SAMPLE_GLB = _sample_glb_path()
 QT_TESTS = os.environ.get("LIGHT_ENGINE_QT_TESTS") == "1"
+HAVE_FFMPEG = bool(video_mod.find_ffmpeg())
 
 
 class SceneTests(unittest.TestCase):
@@ -5142,6 +5144,353 @@ class QtGizmoUndoTests(unittest.TestCase):
         window.redo()
         self.assertEqual((vp.target, vp.distance, vp.azimuth,
                           vp.elevation), camera)
+        window.close()
+
+
+class VideoExportTests(unittest.TestCase):
+    """T15, headless half: the video module's ffmpeg command, pipe,
+    cancel, and failure paths, driven against a fake ffmpeg (a small
+    script that records stdin + argv, creates the output file, and
+    exits 0) so nothing here needs a real encode."""
+
+    _RECORDER = """#!/usr/bin/env python3
+import json, sys
+out = sys.argv[-1]
+open(out, "wb").close()
+data = sys.stdin.buffer.read()
+with open(out + ".report", "w") as fh:
+    json.dump({"bytes": len(data), "argv": sys.argv[1:]}, fh)
+"""
+
+    _FAILURE = """#!/usr/bin/env python3
+import sys
+sys.stderr.write("fake ffmpeg: boom\\n")
+sys.exit(1)
+"""
+
+    def _write_fake(self, tmp, name, source):
+        path = os.path.join(tmp, name)
+        with open(path, "w") as fh:
+            fh.write(source)
+        os.chmod(path, 0o755)
+        return path
+
+    def _wait_for(self, path, timeout=2.0):
+        import time
+        deadline = time.time() + timeout
+        while not os.path.exists(path) and time.time() < deadline:
+            time.sleep(0.05)
+        return os.path.exists(path)
+
+    def test_find_ffmpeg_returns_path_or_none(self):
+        found = video_mod.find_ffmpeg()
+        self.assertTrue(found is None or os.path.isfile(found))
+        if found is not None:
+            self.assertTrue(os.access(found, os.X_OK))
+
+    def test_find_ffmpeg_unknown_name_returns_none(self):
+        self.assertIsNone(
+            video_mod.find_ffmpeg("no-such-program-reblend-xyz"))
+
+    def test_even_rounds_down(self):
+        self.assertEqual(video_mod.even(775), 774)
+        self.assertEqual(video_mod.even(646), 646)
+        self.assertEqual(video_mod.even(3), 2)
+        self.assertEqual(video_mod.even(2), 2)
+        self.assertEqual(video_mod.even(1), 2)
+
+    def test_export_size_scales_and_evens(self):
+        self.assertEqual(video_mod.export_size(775, 646, 1.0),
+                         (774, 646))
+        self.assertEqual(video_mod.export_size(775, 646, 0.5),
+                         (386, 322))
+        self.assertEqual(video_mod.export_size(775, 646, 0.25),
+                         (192, 160))
+
+    def test_mp4_command_shape(self):
+        cmd = video_mod.build_ffmpeg_command(
+            "ffmpeg", "/tmp/out.mp4", 774, 646, 24, "mp4")
+        self.assertEqual(cmd[0], "ffmpeg")
+        self.assertEqual(cmd[-1], "/tmp/out.mp4")
+        self.assertIn("-y", cmd)
+        self.assertIn("-nostats", cmd)
+        self.assertIn("rawvideo", cmd)
+        self.assertIn("rgb24", cmd)
+        self.assertIn("774x646", cmd)
+        self.assertIn("24", cmd)
+        self.assertIn("libx264", cmd)
+        self.assertIn("yuv420p", cmd)
+
+    def test_webm_command_shape(self):
+        cmd = video_mod.build_ffmpeg_command(
+            "ffmpeg", "/tmp/out.webm", 386, 322, 24, "webm")
+        self.assertEqual(cmd[-1], "/tmp/out.webm")
+        self.assertIn("libvpx-vp9", cmd)
+        self.assertIn("386x322", cmd)
+        self.assertNotIn("libx264", cmd)
+
+    def test_fake_ffmpeg_pipe_writes_frames(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = self._write_fake(tmp, "fake-ffmpeg", self._RECORDER)
+            out = os.path.join(tmp, "out.mp4")
+            exporter = video_mod.VideoExporter(fake, out, 16, 16, 24,
+                                               "mp4")
+            self.assertTrue(exporter.start())
+            frame = bytes([i % 256 for i in range(16 * 16 * 3)])
+            for _ in range(3):
+                self.assertTrue(exporter.write_frame(frame))
+            self.assertEqual(exporter.frames_written, 3)
+            ok, err = exporter.finish()
+            self.assertTrue(ok, err)
+            with open(out + ".report") as fh:
+                report = json.load(fh)
+            self.assertEqual(report["bytes"], 3 * 16 * 16 * 3)
+            self.assertIn("16x16", report["argv"])
+            self.assertIn("libx264", report["argv"])
+            self.assertEqual(report["argv"][-1], out)
+
+    def test_cancel_deletes_partial_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = self._write_fake(tmp, "fake-ffmpeg", self._RECORDER)
+            out = os.path.join(tmp, "out.mp4")
+            exporter = video_mod.VideoExporter(fake, out, 16, 16, 24,
+                                               "mp4")
+            self.assertTrue(exporter.start())
+            self.assertTrue(
+                exporter.write_frame(bytes(16 * 16 * 3)))
+            self.assertTrue(self._wait_for(out),
+                            "fake ffmpeg never created the output")
+            exporter.cancel()
+            self.assertFalse(os.path.exists(out))
+
+    def test_finish_reports_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = self._write_fake(tmp, "fake-ffmpeg", self._FAILURE)
+            out = os.path.join(tmp, "out.mp4")
+            exporter = video_mod.VideoExporter(fake, out, 16, 16, 24,
+                                               "mp4")
+            self.assertTrue(exporter.start())
+            exporter.write_frame(bytes(16 * 16 * 3))
+            ok, err = exporter.finish()
+            self.assertFalse(ok)
+            self.assertIn("boom", err)
+
+    def test_start_missing_ffmpeg_fails_cleanly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "out.mp4")
+            exporter = video_mod.VideoExporter(
+                "/nonexistent/ffmpeg-xyz", out, 16, 16, 24, "mp4")
+            self.assertFalse(exporter.start())
+            self.assertTrue(exporter.spawn_error())
+            ok, _err = exporter.finish()
+            self.assertFalse(ok)
+
+
+@unittest.skipUnless(QT_TESTS, "Qt tests need LIGHT_ENGINE_QT_TESTS=1")
+class QtVideoExportTests(unittest.TestCase):
+    """T15, Qt half: the export dialog (defaults, sizes, range
+    validation), the RGB24 grab, the window export loop against a
+    fake ffmpeg (all frames written, cancel deletes the partial
+    file, missing ffmpeg shows the install line), and the real
+    encodes — a 48-frame tavern MP4 and a short WebM, both played
+    back with ffprobe (skipped when ffmpeg is absent)."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6 import QtWidgets
+        cls._app = QtWidgets.QApplication.instance()
+        if cls._app is None:
+            cls._app = QtWidgets.QApplication([])
+        from light_engine.window import MainWindow
+        cls.MainWindow = MainWindow
+
+    def _open_tavern(self):
+        scene = scene_mod.load_scene(str(EXAMPLE))
+        window = self.MainWindow(scene=scene)
+        window.resize(800, 600)
+        window.show()
+        self._pump()
+        return window
+
+    def _pump(self, rounds=20):
+        from PySide6 import QtCore, QtWidgets
+        for _ in range(rounds):
+            QtWidgets.QApplication.processEvents()
+            QtCore.QThread.msleep(50)
+
+    def _write_fake_ffmpeg(self, tmp):
+        path = os.path.join(tmp, "fake-ffmpeg")
+        with open(path, "w") as fh:
+            fh.write(VideoExportTests._RECORDER)
+        os.chmod(path, 0o755)
+        return path
+
+    def _probe(self, path):
+        import subprocess
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-count_frames",
+             "-select_streams", "v:0",
+             "-show_entries",
+             "stream=nb_read_frames,codec_name,width,height",
+             "-of", "csv=p=0", path],
+            capture_output=True, text=True)
+        self.assertEqual(probe.returncode, 0, probe.stderr)
+        codec, width, height, frames = probe.stdout.strip().split(",")
+        return codec, int(width), int(height), int(frames)
+
+    def _decode_frame(self, path, number, width, height):
+        import subprocess
+        raw = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", path,
+             "-vf", f"select='eq(n\\,{number})'",
+             "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24",
+             "-"],
+            capture_output=True)
+        self.assertEqual(raw.returncode, 0, raw.stderr.decode())
+        self.assertEqual(len(raw.stdout), width * height * 3)
+        return raw.stdout
+
+    def test_dialog_defaults(self):
+        from light_engine.window import VideoExportDialog
+        dialog = VideoExportDialog(None, 775, 646, 48, 24)
+        self.assertEqual(dialog.format(), "mp4")
+        self.assertEqual(dialog.size(), (774, 646))
+        self.assertEqual(dialog.frame_range(), (0, 48))
+        self.assertIsNone(dialog.validate())
+        dialog.close()
+
+    def test_dialog_size_options(self):
+        from light_engine.window import VideoExportDialog
+        dialog = VideoExportDialog(None, 775, 646, 48, 24)
+        dialog._size_combo.setCurrentIndex(1)
+        self.assertEqual(dialog.size(), (386, 322))
+        dialog._size_combo.setCurrentIndex(2)
+        self.assertEqual(dialog.size(), (192, 160))
+        dialog._format_combo.setCurrentIndex(1)
+        self.assertEqual(dialog.format(), "webm")
+        dialog.close()
+
+    def test_dialog_rejects_start_after_end(self):
+        from light_engine.window import VideoExportDialog
+        dialog = VideoExportDialog(None, 775, 646, 48, 24)
+        dialog._start_spin.setValue(30)
+        dialog._end_spin.setValue(10)
+        error = dialog.validate()
+        self.assertIsNotNone(error)
+        self.assertIn("start frame", error)
+        dialog._end_spin.setValue(30)
+        self.assertIsNone(dialog.validate())
+        dialog.close()
+
+    def test_dialog_range_clamped_to_scene(self):
+        from light_engine.window import VideoExportDialog
+        dialog = VideoExportDialog(None, 775, 646, 48, 24)
+        self.assertEqual(dialog._start_spin.maximum(), 48)
+        self.assertEqual(dialog._end_spin.maximum(), 48)
+        dialog._end_spin.setValue(999)
+        self.assertEqual(dialog._end_spin.value(), 48)
+        dialog.close()
+
+    def test_grab_frame_rgb24_size_and_motion(self):
+        window = self._open_tavern()
+        first = window._grab_frame_rgb24(0, 386, 322)
+        mid = window._grab_frame_rgb24(24, 386, 322)
+        self.assertEqual(len(first), 386 * 322 * 3)
+        self.assertEqual(len(mid), 386 * 322 * 3)
+        # The mug slides from x=-60 to x=0 by frame 24 and turns
+        # 90 degrees — the frames must visibly differ. Measured
+        # ~2,700 differing bytes at this size (the mug is small in
+        # the frame); 1,000 is well below that and far above zero.
+        differing = sum(1 for a, b in zip(first, mid) if a != b)
+        self.assertGreater(differing, 1000)
+        window.close()
+
+    def test_export_to_fake_ffmpeg_writes_all_frames(self):
+        window = self._open_tavern()
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = self._write_fake_ffmpeg(tmp)
+            out = os.path.join(tmp, "out.mp4")
+            ok = window._run_video_export(fake, out, 386, 322, 0, 5,
+                                          "mp4")
+            self.assertTrue(ok)
+            self.assertTrue(os.path.exists(out))
+            with open(out + ".report") as fh:
+                report = json.load(fh)
+            self.assertEqual(report["bytes"], 6 * 386 * 322 * 3)
+            self.assertIn("386x322", report["argv"])
+            self.assertIn("libx264", report["argv"])
+        window.close()
+
+    def test_export_cancel_deletes_partial(self):
+        from PySide6 import QtCore
+        window = self._open_tavern()
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = self._write_fake_ffmpeg(tmp)
+            out = os.path.join(tmp, "out.mp4")
+
+            def _try_cancel():
+                progress = window._video_progress
+                if progress is None:
+                    QtCore.QTimer.singleShot(50, _try_cancel)
+                else:
+                    progress.cancel()
+
+            QtCore.QTimer.singleShot(100, _try_cancel)
+            ok = window._run_video_export(fake, out, 386, 322, 0, 5,
+                                          "mp4")
+            self.assertFalse(ok)
+            self.assertFalse(os.path.exists(out))
+        window.close()
+
+    def test_missing_ffmpeg_shows_install_line(self):
+        from PySide6 import QtWidgets
+        window = self._open_tavern()
+        calls = []
+        orig_find = video_mod.find_ffmpeg
+        orig_warn = QtWidgets.QMessageBox.warning
+        try:
+            video_mod.find_ffmpeg = lambda *args: None
+            QtWidgets.QMessageBox.warning = (
+                lambda *args, **kwargs: calls.append(args))
+            window._export_video()
+        finally:
+            video_mod.find_ffmpeg = orig_find
+            QtWidgets.QMessageBox.warning = orig_warn
+        self.assertEqual(len(calls), 1)
+        self.assertIn("ffmpeg", calls[0][2])
+        self.assertIn("sudo apt install ffmpeg", calls[0][2])
+        window.close()
+
+    @unittest.skipUnless(HAVE_FFMPEG, "needs ffmpeg on PATH")
+    def test_real_mp4_encode_48_frames(self):
+        window = self._open_tavern()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "tavern.mp4")
+            ok = window._run_video_export(
+                video_mod.find_ffmpeg(), out, 386, 322, 0, 47, "mp4")
+            self.assertTrue(ok)
+            codec, width, height, frames = self._probe(out)
+            self.assertEqual(codec, "h264")
+            self.assertEqual((width, height), (386, 322))
+            self.assertEqual(frames, 48)
+            first = self._decode_frame(out, 0, 386, 322)
+            mid = self._decode_frame(out, 24, 386, 322)
+            differing = sum(1 for a, b in zip(first, mid) if a != b)
+            self.assertGreater(differing, len(first) // 100)
+        window.close()
+
+    @unittest.skipUnless(HAVE_FFMPEG, "needs ffmpeg on PATH")
+    def test_real_webm_encode_short(self):
+        window = self._open_tavern()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "tavern.webm")
+            ok = window._run_video_export(
+                video_mod.find_ffmpeg(), out, 192, 160, 0, 5, "webm")
+            self.assertTrue(ok)
+            codec, width, height, frames = self._probe(out)
+            self.assertEqual(codec, "vp9")
+            self.assertEqual((width, height), (192, 160))
+            self.assertEqual(frames, 6)
         window.close()
 
 

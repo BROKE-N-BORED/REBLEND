@@ -17,6 +17,7 @@ from . import meshfile as meshfile_mod
 from . import meshio as meshio_mod
 from . import meshio_glb as meshio_glb_mod
 from . import meshio_obj as meshio_obj_mod
+from . import video as video_mod
 from .scene import (default_smooth_shading, find_object, load_scene,
                     new_object, new_scene, save_scene, scene_copy,
                     total_triangles)
@@ -104,6 +105,87 @@ class ExportDialog(QtWidgets.QDialog):
         return self._scale_spin.value()
 
 
+class VideoExportDialog(QtWidgets.QDialog):
+    """Format / resolution / frame range before a video export (T15).
+    Mirrors ExportDialog: plain rows, Ok/Cancel, the choices read back
+    after accept(). The resolution options are fractions of the
+    viewport size (aspect preserved); the sizes shown are the
+    even-rounded export sizes ffmpeg will actually get. The frame
+    range defaults to the scene's full animation range. fps comes
+    from the scene and is shown, not edited. validate() returns an
+    error string or None — accept() shows it and stays open, and
+    tests call validate() directly so no message box ever opens
+    under test."""
+
+    def __init__(self, parent, viewport_width, viewport_height,
+                 end_frame, fps=24):
+        super().__init__(parent)
+        self.setWindowTitle("Export video")
+        self._end_frame = int(end_frame)
+        layout = QtWidgets.QVBoxLayout(self)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("Format:"))
+        self._format_combo = QtWidgets.QComboBox()
+        for key in ("mp4", "webm"):
+            self._format_combo.addItem(video_mod.FORMATS[key]["label"],
+                                       key)
+        row.addWidget(self._format_combo)
+        layout.addLayout(row)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("Resolution:"))
+        self._size_combo = QtWidgets.QComboBox()
+        for scale, label in ((1.0, "Full size"),
+                             (0.5, "Half size"),
+                             (0.25, "Quarter size")):
+            width, height = video_mod.export_size(viewport_width,
+                                                  viewport_height,
+                                                  scale)
+            self._size_combo.addItem(f"{label} ({width}×{height})",
+                                     (width, height))
+        row.addWidget(self._size_combo)
+        layout.addLayout(row)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("Frames:"))
+        self._start_spin = QtWidgets.QSpinBox()
+        self._start_spin.setRange(0, self._end_frame)
+        self._start_spin.setValue(0)
+        row.addWidget(self._start_spin)
+        row.addWidget(QtWidgets.QLabel("to"))
+        self._end_spin = QtWidgets.QSpinBox()
+        self._end_spin.setRange(0, self._end_frame)
+        self._end_spin.setValue(self._end_frame)
+        row.addWidget(self._end_spin)
+        layout.addLayout(row)
+        layout.addWidget(
+            QtWidgets.QLabel(f"{fps} frames per second (from the scene)"))
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def validate(self):
+        if self._start_spin.value() > self._end_spin.value():
+            return "The start frame must not be after the end frame."
+        return None
+
+    def accept(self):
+        error = self.validate()
+        if error is not None:
+            QtWidgets.QMessageBox.warning(self, "Export video", error)
+            return
+        super().accept()
+
+    def format(self):
+        return self._format_combo.currentData()
+
+    def size(self):
+        return self._size_combo.currentData()
+
+    def frame_range(self):
+        return self._start_spin.value(), self._end_spin.value()
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, scene=None, scene_path=None):
         super().__init__()
@@ -120,6 +202,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._live_edit_snapshot = None  # pre-edit scene for live controls
         self._playing = False
         self._frame = 0
+        # The progress dialog while a video export runs (T15); None
+        # otherwise. Held as an attribute so tests and the verify
+        # script can press Cancel on it mid-export.
+        self._video_progress = None
         self._refreshing = False
         self._play_timer = QtCore.QTimer(self)
         self._play_timer.timeout.connect(self._advance_frame)
@@ -182,6 +268,9 @@ class MainWindow(QtWidgets.QMainWindow):
         export_action = QtGui.QAction("Export frames to folder…", self)
         export_action.triggered.connect(self._export_frames)
         file_menu.addAction(export_action)
+        video_action = QtGui.QAction("Export video…", self)
+        video_action.triggered.connect(self._export_video)
+        file_menu.addAction(video_action)
         file_menu.addSeparator()
         quit_action = QtGui.QAction("Quit", self)
         quit_action.setShortcut(QtGui.QKeySequence.Quit)
@@ -1113,6 +1202,135 @@ class MainWindow(QtWidgets.QMainWindow):
                 saved += 1
         self.statusBar().showMessage(
             f"Exported {saved} of {end + 1} frames to {folder}")
+
+    # -- video export (T15) -------------------------------------------------
+    def _export_video(self):
+        """File > Export video: ffmpeg check, options dialog, save
+        dialog, then the export loop. Missing ffmpeg is a plain
+        message with the install line — never a crash, never a
+        silent failure."""
+        ffmpeg = video_mod.find_ffmpeg()
+        if ffmpeg is None:
+            QtWidgets.QMessageBox.warning(
+                self, "ffmpeg is not installed",
+                "Video export needs ffmpeg, which is not installed.\n\n"
+                "Install it with:\n"
+                f"    {video_mod.FFMPEG_INSTALL_LINE}")
+            return
+        viewport = self._viewport
+        dialog = VideoExportDialog(
+            self, viewport.width(), viewport.height(),
+            self.scene["animation"]["end_frame"],
+            self.scene["animation"]["fps"])
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        fmt = dialog.format()
+        width, height = dialog.size()
+        start, end = dialog.frame_range()
+        ext = video_mod.FORMATS[fmt]["extension"]
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Export video", "",
+            f"{fmt.upper()} files (*{ext})")
+        if not path:
+            return
+        if not path.endswith(ext):
+            path += ext
+        self._run_video_export(ffmpeg, path, width, height, start, end,
+                               fmt)
+
+    def _grab_frame_rgb24(self, frame, width, height):
+        """Render one frame off the viewport and return packed RGB24
+        bytes at (width, height). Same suppression as
+        render_frame_to: the gizmo never appears in an export.
+        QImage rows can carry padding (bytesPerLine wider than
+        width*3), so the rows are packed explicitly."""
+        self.set_frame(frame)
+        self._viewport.set_gizmo_suppressed(True)
+        try:
+            self._viewport.update()
+            QtWidgets.QApplication.processEvents()
+            QtCore.QCoreApplication.sendPostedEvents()
+            image = self._viewport.grabFramebuffer()
+            if image.width() != width or image.height() != height:
+                image = image.scaled(
+                    width, height, QtCore.Qt.IgnoreAspectRatio,
+                    QtCore.Qt.SmoothTransformation)
+            rgb = image.convertToFormat(QtGui.QImage.Format_RGB888)
+            stride = rgb.bytesPerLine()
+            row_bytes = width * 3
+            raw = bytes(rgb.constBits())
+            if stride == row_bytes:
+                return raw
+            return b"".join(raw[y * stride:y * stride + row_bytes]
+                            for y in range(height))
+        finally:
+            self._viewport.set_gizmo_suppressed(False)
+
+    def _run_video_export(self, ffmpeg, path, width, height, start, end,
+                          fmt):
+        """The export loop, split from the dialog flow so tests can
+        drive it directly with a fake ffmpeg. Renders on the GUI
+        thread (the OpenGL context lives there) and pumps events
+        after every frame, so the window stays responsive and Cancel
+        works. Returns True on a finished encode, False on cancel
+        or failure. A cancelled or failed export leaves no file."""
+        fps = self.scene["animation"]["fps"]
+        total = end - start + 1
+        was_playing = self._playing
+        if was_playing:
+            self._toggle_play()
+        exporter = video_mod.VideoExporter(ffmpeg, path, width, height,
+                                           fps, fmt)
+        if not exporter.start():
+            QtWidgets.QMessageBox.warning(
+                self, "Video export failed",
+                f"Could not start ffmpeg: {exporter.spawn_error()}")
+            return False
+        progress = QtWidgets.QProgressDialog(
+            "Exporting video…", "Cancel", 0, total, self)
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        self._video_progress = progress
+        failed = None
+        try:
+            for index, frame in enumerate(range(start, end + 1)):
+                rgb = self._grab_frame_rgb24(frame, width, height)
+                if not exporter.write_frame(rgb):
+                    failed = "ffmpeg stopped accepting frames"
+                    break
+                progress.setValue(index + 1)
+                QtWidgets.QApplication.processEvents()
+                if progress.wasCanceled():
+                    exporter.cancel()
+                    self.statusBar().showMessage(
+                        "Video export cancelled")
+                    return False
+        finally:
+            self._video_progress = None
+            progress.close()
+        if failed is not None:
+            _ok, detail = exporter.finish()
+            exporter.cancel()
+            message = failed
+            if detail:
+                message += f"\n\n{detail}"
+            QtWidgets.QMessageBox.warning(self, "Video export failed",
+                                          message)
+            return False
+        ok, detail = exporter.finish()
+        if not ok:
+            exporter.cancel()
+            message = "ffmpeg failed to write the video."
+            if detail:
+                message += f"\n\n{detail}"
+            QtWidgets.QMessageBox.warning(self, "Video export failed",
+                                          message)
+            return False
+        self.statusBar().showMessage(
+            f"Exported video to {os.path.basename(path)} "
+            f"({total} frames)")
+        return True
 
     # -- animation ----------------------------------------------------------------
     def set_frame(self, frame):
