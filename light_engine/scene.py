@@ -4,8 +4,12 @@ Scene JSON (format v2, T6):
   {
     "name": "...", "version": 2,
     "objects": [ { "id", "name", "shape", "params",
-                   "kind": "object" | "emitter" (default "object"; emitters
-                           are T16 — the v2 loader only preserves the field),
+                   "kind": "object" | "emitter" (default "object"),
+                   "emitter": { ... } (emitter objects only, T16 — see
+                           default_emitter_params: shape, rate, lifetime,
+                           speed, size, colors, opacity, gravity factor,
+                           drag, wind response, turbulence, attract,
+                           collide, seed, preset),
                    "mesh_file": "assets/....mesh.json" (mesh objects, T7;
                            geometry comes from that asset file — see
                            meshfile.py for the .mesh.json schema),
@@ -22,6 +26,10 @@ Scene JSON (format v2, T6):
     "lights":  [ { "name", "kind": "key"|"fill"|"rim"|"ambient",
                    "position": [x, y, z], "color": "#rrggbb",
                    "intensity": 0..1 } ],
+    "world": { "gravity": [0, 0, -981], "wind": [0, 0, 0],
+               "wind_gust": { "amplitude": 0.0, "frequency": 0.0 } }
+               (T16 — scene gravity + wind for particles/physics;
+               missing entirely in old scenes, defaults apply),
     "physics": { object_id: { ... } } (T18 — preserved, not used yet),
     "animation": { "fps": 24, "end_frame": 48,
                    "keys": { object_id: { "position": [[frame, [x,y,z]], ...],
@@ -44,6 +52,189 @@ from .geometry import default_params
 TEXTURES = ("none", "wood_grain", "brushed_metal", "worn_leather")
 MATERIAL_DEFAULTS = {"base_color": "#b0b0b0", "roughness": 0.6,
                      "metalness": 0.0, "texture": "none"}
+
+# Emitter parameter set (T16, Design 5 revised). The emitter dict lives
+# on the object under "emitter" — the object's "params" stay the
+# primitive geometry params, so the two never collide.
+EMITTER_SHAPES = ("point", "box", "sphere", "cone")
+EMITTER_COLLIDE = ("none", "kill", "bounce")
+EMITTER_PRESETS = ("custom", "fire", "smoke", "sparks", "rain",
+                   "snow", "dust", "water")
+DEFAULT_GRAVITY = [0.0, 0.0, -981.0]  # cm/s^2, z-up
+
+
+def _clamp(value, low, high, default):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, value))
+
+
+def _hex_color(value, default):
+    text = str(value or "").strip()
+    if len(text) == 7 and text.startswith("#"):
+        try:
+            int(text[1:], 16)
+            return text.lower()
+        except ValueError:
+            pass
+    return default
+
+
+def default_world(overrides=None):
+    """The top-level "world" section: scene gravity + wind (T16).
+    Tolerant: a missing or mistyped section gets the defaults."""
+    world = {"gravity": list(DEFAULT_GRAVITY), "wind": [0.0, 0.0, 0.0],
+             "wind_gust": {"amplitude": 0.0, "frequency": 0.0}}
+    if not isinstance(overrides, dict):
+        return world
+    for key in ("gravity", "wind"):
+        try:
+            vals = [float(v) for v in overrides.get(key, world[key])]
+            if len(vals) == 3:
+                world[key] = vals
+        except (TypeError, ValueError):
+            pass
+    gust = overrides.get("wind_gust")
+    if isinstance(gust, dict):
+        world["wind_gust"]["amplitude"] = _clamp(
+            gust.get("amplitude", 0.0), 0.0, 1e9, 0.0)
+        world["wind_gust"]["frequency"] = _clamp(
+            gust.get("frequency", 0.0), 0.0, 1e9, 0.0)
+    return world
+
+
+def default_emitter_params(overrides=None):
+    """The full emitter parameter set (T16, Design 5). Units are cm and
+    seconds. Every value is validated: an unknown shape / collide mode /
+    preset falls back to its default, numbers clamp into range, and a
+    mistyped value keeps the default — loading never fails on a bad
+    emitter dict. Nothing here refuses: rate and lifetime only clamp
+    at zero (a zero rate simply emits nothing)."""
+    params = {
+        # Emission shape: point (one spot), box (volume), sphere
+        # (volume), cone (apex + direction cone). box_size and
+        # sphere_radius size the volume shapes.
+        "shape": "point",
+        "box_size": [20.0, 20.0, 20.0],
+        "sphere_radius": 10.0,
+        # Emission: particles per second, seconds of life.
+        "rate": 60.0,
+        "lifetime": 1.0,
+        "lifetime_spread": 0.3,
+        # Initial velocity: cm/s along the emitter's forward (+Z,
+        # rotated by the object rotation), inside the spread cone.
+        "speed": 50.0,
+        "speed_spread": 0.3,
+        "spread": 15.0,
+        # Appearance over life: start size in cm, growth factor at
+        # death (smoke grows ~3x, sparks shrink to 0), colors
+        # interpolated start -> end, opacity fades as fractions of
+        # life (fade in over the first 10%, out over the last 30%).
+        "size": 5.0,
+        "size_over_life": 1.0,
+        "color_start": "#ffffff",
+        "color_end": "#ffffff",
+        "opacity": {"fade_in": 0.1, "fade_out": 0.3},
+        # Forces: gravity_factor multiplies the scene gravity (1 =
+        # normal, 0 = floats, negative = rises); drag is the linear
+        # drag coefficient (0 = none); wind_response 0-1 is how much
+        # the global wind pushes this emitter's particles.
+        "gravity_factor": 1.0,
+        "drag": 0.0,
+        "wind_response": 0.5,
+        # Turbulence is the analytic sine wobble strength in cm
+        # (T16). Position-dependent turbulence is stepped mode (T18).
+        "turbulence": 0.0,
+        # Attraction is stepped-only (T18): {"target": object_id,
+        # "strength": float} or None. Stored now, ignored by the
+        # analytic sim. Collide: "kill" removes a particle at floor
+        # impact (analytic, T16); "bounce" needs stepped mode (T18).
+        "attract": None,
+        "collide": "none",
+        # Seed: same seed + same params = same particles, always.
+        "seed": 0,
+        # Preset: the name the parameters came from ("custom" once
+        # any parameter is edited by hand). The parameters are the
+        # stored state; the name is a convenience for the picker.
+        "preset": "custom",
+    }
+    if not isinstance(overrides, dict):
+        return params
+    if overrides.get("shape") in EMITTER_SHAPES:
+        params["shape"] = overrides["shape"]
+    try:
+        vals = [float(v) for v in overrides.get("box_size",
+                                                params["box_size"])]
+        if len(vals) == 3:
+            params["box_size"] = [max(0.0, v) for v in vals]
+    except (TypeError, ValueError):
+        pass
+    params["sphere_radius"] = _clamp(
+        overrides.get("sphere_radius", params["sphere_radius"]),
+        0.0, 1e9, params["sphere_radius"])
+    params["rate"] = _clamp(overrides.get("rate", params["rate"]),
+                            0.0, 1e9, params["rate"])
+    # Lifetime 0 would mean no particle is ever alive; the floor is a
+    # normalization, not a refusal — a 10 ms life still emits.
+    params["lifetime"] = _clamp(overrides.get("lifetime",
+                                              params["lifetime"]),
+                                0.01, 1e9, params["lifetime"])
+    params["lifetime_spread"] = _clamp(
+        overrides.get("lifetime_spread", params["lifetime_spread"]),
+        0.0, 1.0, params["lifetime_spread"])
+    params["speed"] = _clamp(overrides.get("speed", params["speed"]),
+                             0.0, 1e9, params["speed"])
+    params["speed_spread"] = _clamp(
+        overrides.get("speed_spread", params["speed_spread"]),
+        0.0, 1.0, params["speed_spread"])
+    params["spread"] = _clamp(overrides.get("spread", params["spread"]),
+                              0.0, 180.0, params["spread"])
+    params["size"] = _clamp(overrides.get("size", params["size"]),
+                            0.01, 1e9, params["size"])
+    params["size_over_life"] = _clamp(
+        overrides.get("size_over_life", params["size_over_life"]),
+        0.0, 1e9, params["size_over_life"])
+    params["color_start"] = _hex_color(
+        overrides.get("color_start"), params["color_start"])
+    params["color_end"] = _hex_color(overrides.get("color_end"),
+                                     params["color_end"])
+    opacity = overrides.get("opacity")
+    if isinstance(opacity, dict):
+        params["opacity"] = {
+            "fade_in": _clamp(opacity.get("fade_in", 0.1),
+                              0.0, 1.0, 0.1),
+            "fade_out": _clamp(opacity.get("fade_out", 0.3),
+                               0.0, 1.0, 0.3),
+        }
+    params["gravity_factor"] = _clamp(
+        overrides.get("gravity_factor", params["gravity_factor"]),
+        -1e9, 1e9, params["gravity_factor"])
+    params["drag"] = _clamp(overrides.get("drag", params["drag"]),
+                            0.0, 1e9, params["drag"])
+    params["wind_response"] = _clamp(
+        overrides.get("wind_response", params["wind_response"]),
+        0.0, 1.0, params["wind_response"])
+    params["turbulence"] = _clamp(
+        overrides.get("turbulence", params["turbulence"]),
+        0.0, 1e9, params["turbulence"])
+    attract = overrides.get("attract")
+    if isinstance(attract, dict) and attract.get("target"):
+        params["attract"] = {
+            "target": str(attract["target"]),
+            "strength": _clamp(attract.get("strength", 0.0),
+                               -1e9, 1e9, 0.0),
+        }
+    if overrides.get("collide") in EMITTER_COLLIDE:
+        params["collide"] = overrides["collide"]
+    try:
+        params["seed"] = int(overrides.get("seed", 0))
+    except (TypeError, ValueError):
+        params["seed"] = 0
+    if overrides.get("preset") in EMITTER_PRESETS:
+        params["preset"] = overrides["preset"]
+    return params
 # Shapes that default to smooth shading (T3): curved primitives.
 # Box and plane default flat, so their edges stay crisp.
 SMOOTH_SHAPES = ("sphere", "cylinder", "cone", "torus")
@@ -85,6 +276,19 @@ def new_object(shape, name=None, position=None, params=None, material=None):
     return obj
 
 
+def new_emitter(name=None, position=None, params=None):
+    """An emitter object (T16): kind "emitter" with the full parameter
+    set. The shape is a small 10 cm box — the emitter's marker in the
+    viewport until T17 draws the particles themselves. The emission
+    shape (point/box/sphere/cone) is a parameter, not the object
+    shape."""
+    obj = new_object("box", name=name or "Emitter", position=position,
+                     params={"size": [10.0, 10.0, 10.0]})
+    obj["kind"] = "emitter"
+    obj["emitter"] = default_emitter_params(params)
+    return obj
+
+
 def default_lights():
     return [
         {"name": "Key", "kind": "key", "position": [-300.0, -300.0, 400.0],
@@ -105,6 +309,7 @@ def new_scene(name="Untitled"):
         "objects": [],
         "cameras": [],
         "lights": default_lights(),
+        "world": default_world(),
         "animation": {"fps": 24, "end_frame": 48, "keys": {}},
     }
 
@@ -117,11 +322,15 @@ def normalize_object(raw):
                      params=raw.get("params"),
                      material=raw.get("material"))
     obj["id"] = str(raw.get("id") or obj["id"])
-    # kind is a v2 field (T6): "object" or "emitter" (emitters are T16;
-    # the loader only accepts and preserves the value). Anything else
+    # kind is a v2 field (T6): "object" or "emitter". Anything else
     # — including a v1 file with no kind at all — means "object".
     if raw.get("kind") in ("object", "emitter"):
         obj["kind"] = raw["kind"]
+    # The emitter parameter set (T16): normalized with defaults, so
+    # an emitter with a missing or partial "emitter" dict still loads
+    # whole. Non-emitters never carry the dict.
+    if obj["kind"] == "emitter":
+        obj["emitter"] = default_emitter_params(raw.get("emitter"))
     # mesh_file is a v2 field (T7): preserved if it is a string, so a
     # scene round-trips intact. The viewport resolves it against the
     # scene's folder and renders the asset; the window drops a mesh
@@ -161,6 +370,9 @@ def normalize_scene(raw):
     scene["version"] = 2
     scene["objects"] = [normalize_object(o) for o in raw.get("objects", [])
                         if isinstance(o, dict)]
+    # world is a v2 section (T16): scene gravity + wind. Old scenes
+    # without it load with the defaults.
+    scene["world"] = default_world(raw.get("world"))
     # physics is a v2 section (T18): preserved as-is so a scene
     # round-trips intact; nothing reads it yet.
     if isinstance(raw.get("physics"), dict):

@@ -24,6 +24,7 @@ from light_engine import meshfile  # noqa: E402
 from light_engine import meshio  # noqa: E402
 from light_engine import meshio_glb  # noqa: E402
 from light_engine import meshio_obj  # noqa: E402
+from light_engine import particles as particles_mod  # noqa: E402
 from light_engine import scene as scene_mod  # noqa: E402
 from light_engine import shaders  # noqa: E402
 from light_engine import textures  # noqa: E402
@@ -5491,6 +5492,518 @@ class QtVideoExportTests(unittest.TestCase):
             self.assertEqual(codec, "vp9")
             self.assertEqual((width, height), (192, 160))
             self.assertEqual(frames, 6)
+        window.close()
+
+
+class ParticleSimTests(unittest.TestCase):
+    """T16: emitter object + analytic particle sim (headless)."""
+
+    def test_default_emitter_params(self):
+        params = scene_mod.default_emitter_params()
+        self.assertEqual(params["shape"], "point")
+        self.assertEqual(params["rate"], 60.0)
+        self.assertEqual(params["lifetime"], 1.0)
+        self.assertEqual(params["lifetime_spread"], 0.3)
+        self.assertEqual(params["speed"], 50.0)
+        self.assertEqual(params["speed_spread"], 0.3)
+        self.assertEqual(params["spread"], 15.0)
+        self.assertEqual(params["size"], 5.0)
+        self.assertEqual(params["size_over_life"], 1.0)
+        self.assertEqual(params["color_start"], "#ffffff")
+        self.assertEqual(params["opacity"], {"fade_in": 0.1,
+                                            "fade_out": 0.3})
+        self.assertEqual(params["gravity_factor"], 1.0)
+        self.assertEqual(params["drag"], 0.0)
+        self.assertEqual(params["wind_response"], 0.5)
+        self.assertEqual(params["turbulence"], 0.0)
+        self.assertIsNone(params["attract"])
+        self.assertEqual(params["collide"], "none")
+        self.assertEqual(params["seed"], 0)
+        self.assertEqual(params["preset"], "custom")
+
+    def test_new_emitter(self):
+        emitter = scene_mod.new_emitter("Fire", position=[0, 0, 50])
+        self.assertEqual(emitter["kind"], "emitter")
+        self.assertEqual(emitter["name"], "Fire")
+        self.assertEqual(emitter["position"], [0, 0, 50])
+        self.assertEqual(emitter["shape"], "box")
+        self.assertEqual(emitter["params"], {"size": [10.0, 10.0, 10.0]})
+        self.assertEqual(emitter["emitter"]["rate"], 60.0)
+
+    def test_world_defaults_in_new_scene(self):
+        scene = scene_mod.new_scene()
+        self.assertEqual(scene["world"]["gravity"], [0.0, 0.0, -981.0])
+        self.assertEqual(scene["world"]["wind"], [0.0, 0.0, 0.0])
+        self.assertEqual(scene["world"]["wind_gust"],
+                         {"amplitude": 0.0, "frequency": 0.0})
+
+    def test_old_scene_loads_with_world_defaults(self):
+        # A scene file with no "world" section at all (every scene
+        # written before T16) loads with the defaults.
+        raw = {"name": "old", "version": 1, "objects": [
+            {"id": "a1", "name": "Box", "shape": "box"}]}
+        scene = scene_mod.normalize_scene(raw)
+        self.assertEqual(scene["world"]["gravity"], [0.0, 0.0, -981.0])
+        self.assertEqual(scene["world"]["wind"], [0.0, 0.0, 0.0])
+        self.assertNotIn("emitter", scene["objects"][0])
+
+    def test_emitter_without_params_loads_with_defaults(self):
+        raw = {"name": "t", "version": 2, "objects": [
+            {"id": "e1", "name": "Puffs", "shape": "box",
+             "kind": "emitter"}]}
+        scene = scene_mod.normalize_scene(raw)
+        self.assertEqual(scene["objects"][0]["emitter"]["rate"], 60.0)
+        self.assertEqual(scene["objects"][0]["emitter"]["preset"],
+                         "custom")
+
+    def test_emitter_round_trip_save_load(self):
+        scene = scene_mod.new_scene("t16")
+        emitter = scene_mod.new_emitter("Fire")
+        emitter["emitter"] = particles_mod.apply_preset(None, "fire")
+        scene["objects"] = [emitter]
+        scene["world"]["wind"] = [50.0, 0.0, 0.0]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "scene.json")
+            scene_mod.save_scene(scene, path)
+            loaded = scene_mod.load_scene(path)
+        self.assertEqual(loaded["objects"][0]["kind"], "emitter")
+        self.assertEqual(loaded["objects"][0]["emitter"]["preset"],
+                         "fire")
+        self.assertEqual(loaded["objects"][0]["emitter"]["rate"], 80.0)
+        self.assertEqual(loaded["world"]["wind"], [50.0, 0.0, 0.0])
+
+    def test_bad_emitter_values_fall_back(self):
+        params = scene_mod.default_emitter_params({
+            "shape": "nope", "rate": -5, "lifetime": 0,
+            "lifetime_spread": 9, "color_start": "junk",
+            "collide": "explode", "preset": "nope", "seed": "x",
+            "spread": 999, "wind_response": -1})
+        self.assertEqual(params["shape"], "point")
+        self.assertEqual(params["rate"], 0.0)
+        self.assertEqual(params["lifetime"], 0.01)
+        self.assertEqual(params["lifetime_spread"], 1.0)
+        self.assertEqual(params["color_start"], "#ffffff")
+        self.assertEqual(params["collide"], "none")
+        self.assertEqual(params["preset"], "custom")
+        self.assertEqual(params["seed"], 0)
+        self.assertEqual(params["spread"], 180.0)
+        self.assertEqual(params["wind_response"], 0.0)
+
+    def test_evaluate_deterministic_same_frame(self):
+        params = particles_mod.apply_preset(None, "fire")
+        first = particles_mod.evaluate_emitter(params, frame=24)
+        second = particles_mod.evaluate_emitter(params, frame=24)
+        self.assertEqual(first, second)
+
+    def test_scrub_determinism_forward_backward(self):
+        params = particles_mod.apply_preset(None, "smoke")
+        frames = [0, 6, 12, 18, 24]
+        forward = {f: particles_mod.evaluate_emitter(params, frame=f)
+                   for f in frames}
+        backward = {f: particles_mod.evaluate_emitter(params, frame=f)
+                    for f in reversed(frames)}
+        shuffled = {f: particles_mod.evaluate_emitter(params, frame=f)
+                    for f in (12, 0, 24, 6, 18)}
+        for f in frames:
+            self.assertEqual(forward[f], backward[f])
+            self.assertEqual(forward[f], shuffled[f])
+
+    def test_closed_form_matches_numeric_integration(self):
+        # The gold-standard check for the closed form: integrate the
+        # same ODE (gravity + drag + sinusoidal gust) with tiny
+        # semi-implicit Euler steps and compare positions. The
+        # residual is the integrator's own O(dt) error, so the
+        # tolerance is loose in absolute terms (1 cm on paths of
+        # hundreds of cm) and tight relative to the motion.
+        def numeric(p0, v0, a, gust, omega, phase, drag, tau):
+            pos = list(p0)
+            vel = list(v0)
+            t = 0.0
+            dt = 0.0005
+            while t < tau - 1e-12:
+                h = min(dt, tau - t)
+                acc = [a[i] + gust[i] * math.sin(omega * t + phase)
+                       - drag * vel[i] for i in range(3)]
+                vel = [vel[i] + acc[i] * h for i in range(3)]
+                pos = [pos[i] + vel[i] * h for i in range(3)]
+                t += h
+            return tuple(pos)
+
+        cases = [
+            ((0, 0, 100), (50, 0, 200), (0, 0, -981), (0, 0, 0),
+             0.0, 0.0, 0.0, 1.0),
+            ((0, 0, 100), (50, 0, 200), (0, 0, -981), (0, 0, 0),
+             0.0, 0.0, 1.5, 1.0),
+            ((0, 0, 100), (50, 0, 200), (0, 0, -981), (300, 0, 0),
+             2 * math.pi * 0.5, 0.7, 0.0, 1.5),
+            ((0, 0, 100), (50, 0, 200), (0, 0, -981), (300, 0, 0),
+             2 * math.pi * 0.5, 0.7, 1.5, 1.5),
+            ((10, 20, 300), (-100, 50, 0), (100, 0, -490),
+             (0, 200, 0), 2 * math.pi * 1.2, 2.1, 0.8, 2.0),
+        ]
+        for p0, v0, a, g, w, ph, k, tau in cases:
+            closed = particles_mod._ballistic(
+                p0, v0, a, g, w, ph, k, tau)
+            num = numeric(p0, v0, a, g, w, ph, k, tau)
+            for i in range(3):
+                self.assertAlmostEqual(closed[i], num[i], delta=1.0)
+
+    def test_gravity_factor_minus_one_rises(self):
+        # Speed 0, gravity_factor -1: particle 0 is born at t=0 and
+        # rises 1/2 * 981 * 1^2 = 490.5 cm by frame 24 (t=1 s).
+        params = scene_mod.default_emitter_params({
+            "gravity_factor": -1.0, "speed": 0.0, "rate": 10.0,
+            "lifetime": 2.0, "turbulence": 0.0})
+        result = particles_mod.evaluate_emitter(params, frame=24)
+        self.assertGreater(result["count"], 0)
+        self.assertAlmostEqual(result["positions"][0][2], 490.5,
+                               places=6)
+        mean_z = (sum(p[2] for p in result["positions"])
+                  / result["count"])
+        self.assertGreater(mean_z, 100.0)
+
+    def test_gravity_factor_zero_floats(self):
+        params = scene_mod.default_emitter_params({
+            "gravity_factor": 0.0, "speed": 0.0, "rate": 10.0,
+            "lifetime": 2.0, "turbulence": 0.0})
+        result = particles_mod.evaluate_emitter(params, frame=24)
+        for pos in result["positions"]:
+            self.assertEqual(pos, (0.0, 0.0, 0.0))
+
+    def test_drag_slows_particles(self):
+        base = {"gravity_factor": 0.0, "speed": 200.0, "spread": 0.0,
+                "speed_spread": 0.0, "rate": 10.0, "lifetime": 2.0,
+                "turbulence": 0.0}
+        no_drag = particles_mod.evaluate_emitter(
+            scene_mod.default_emitter_params(dict(base, drag=0.0)),
+            frame=24)
+        dragged = particles_mod.evaluate_emitter(
+            scene_mod.default_emitter_params(dict(base, drag=2.0)),
+            frame=24)
+        # No drag: z = 200 * 1 s. With drag: 200 * (1 - e^-2) / 2.
+        self.assertAlmostEqual(no_drag["positions"][0][2], 200.0,
+                               places=6)
+        self.assertAlmostEqual(dragged["positions"][0][2],
+                               100.0 * (1.0 - math.exp(-2.0)),
+                               places=6)
+        self.assertLess(dragged["positions"][0][2],
+                        no_drag["positions"][0][2])
+
+    def test_presets_load_sensible_parameters(self):
+        fire = particles_mod.apply_preset(None, "fire")
+        self.assertEqual(fire["preset"], "fire")
+        self.assertLess(fire["gravity_factor"], 0.0)
+        self.assertEqual(fire["color_start"], "#ffdd55")
+        self.assertLess(fire["size_over_life"], 1.0)
+        smoke = particles_mod.apply_preset(None, "smoke")
+        self.assertEqual(smoke["size_over_life"], 3.0)
+        self.assertEqual(smoke["lifetime"], 3.0)
+        self.assertLess(smoke["gravity_factor"], 0.0)
+        sparks = particles_mod.apply_preset(None, "sparks")
+        self.assertEqual(sparks["size_over_life"], 0.0)
+        self.assertEqual(sparks["speed"], 300.0)
+        rain = particles_mod.apply_preset(None, "rain")
+        self.assertEqual(rain["collide"], "kill")
+        self.assertEqual(rain["shape"], "box")
+        self.assertEqual(rain["speed"], 0.0)
+        snow = particles_mod.apply_preset(None, "snow")
+        self.assertLess(snow["gravity_factor"], 0.1)
+        self.assertGreater(snow["drag"], 0.0)
+        self.assertEqual(snow["collide"], "kill")
+        dust = particles_mod.apply_preset(None, "dust")
+        self.assertEqual(dust["lifetime"], 5.0)
+        self.assertEqual(dust["shape"], "sphere")
+        water = particles_mod.apply_preset(None, "water")
+        self.assertEqual(water["collide"], "kill")
+        self.assertEqual(water["gravity_factor"], 1.0)
+
+    def test_apply_preset_unknown_raises_and_custom_keeps(self):
+        with self.assertRaises(ValueError):
+            particles_mod.apply_preset(None, "nope")
+        params = scene_mod.default_emitter_params({"rate": 42.0})
+        kept = particles_mod.apply_preset(params, "custom")
+        self.assertEqual(kept["rate"], 42.0)
+        self.assertEqual(kept["preset"], "custom")
+        self.assertIn("fire", particles_mod.preset_names())
+
+    def test_particle_count_grows_to_steady_state(self):
+        # Rate 60, lifetime 1.0, no spread: 1 alive at frame 0, 31
+        # at frame 12, 60 at frame 24 (particle 0 dies exactly on
+        # frame 24), 60 forever after.
+        params = scene_mod.default_emitter_params({
+            "rate": 60.0, "lifetime": 1.0, "lifetime_spread": 0.0})
+        counts = [particles_mod.evaluate_emitter(params, frame=f)
+                  ["count"] for f in (0, 12, 24, 48)]
+        self.assertEqual(counts, [1, 31, 60, 60])
+
+    def test_lifetime_spread_varies_lives(self):
+        varied = particles_mod.evaluate_emitter(
+            scene_mod.default_emitter_params({
+                "rate": 60.0, "lifetime": 1.0,
+                "lifetime_spread": 0.5}), frame=24)
+        self.assertGreater(len(set(varied["lives"])), 1)
+        fixed = particles_mod.evaluate_emitter(
+            scene_mod.default_emitter_params({
+                "rate": 60.0, "lifetime": 1.0,
+                "lifetime_spread": 0.0}), frame=24)
+        self.assertEqual(set(fixed["lives"]), {1.0})
+
+    def test_size_color_alpha_over_life(self):
+        # Smoke grows 3x and darkens over life, fading in and out.
+        params = particles_mod.apply_preset(None, "smoke")
+        result = particles_mod.evaluate_emitter(params, frame=48)
+        sizes = result["sizes"]
+        colors = result["colors"]
+        alphas = result["alphas"]
+        # Sizes span birth (10 cm) to near-death (~3x): the biggest
+        # particle is well over twice the smallest. The oldest
+        # particle (first index) is darker than the youngest.
+        self.assertGreater(max(sizes), 2.5 * min(sizes))
+        self.assertLess(colors[0][0], colors[-1][0])
+        self.assertLess(min(alphas), 0.5)  # fading in or out
+        self.assertEqual(max(alphas), 1.0)  # mid-life is opaque
+
+    def test_floor_kill_rain_dies_on_floor(self):
+        rain = particles_mod.apply_preset(None, "rain")
+        result = particles_mod.evaluate_emitter(
+            rain, frame=48, position=(0.0, 0.0, 200.0))
+        for pos in result["positions"]:
+            self.assertGreaterEqual(pos[2], -1e-9)
+        # Falling 200 cm takes ~0.64 s, less than the 1 s life, so
+        # the kill shortens the steady-state count below rate x life.
+        self.assertLess(result["count"], 160)
+        no_kill = scene_mod.default_emitter_params(
+            dict(rain, collide="none"))
+        control = particles_mod.evaluate_emitter(
+            no_kill, frame=48, position=(0.0, 0.0, 200.0))
+        self.assertGreater(control["count"], result["count"])
+        self.assertLess(min(p[2] for p in control["positions"]), 0.0)
+
+    def test_wind_pushes_particles(self):
+        base = {"gravity_factor": 0.0, "speed": 0.0, "rate": 10.0,
+                "lifetime": 2.0, "turbulence": 0.0,
+                "wind_response": 1.0}
+        world = scene_mod.default_world({"wind": [100.0, 0.0, 0.0]})
+        pushed = particles_mod.evaluate_emitter(
+            scene_mod.default_emitter_params(base), world=world,
+            frame=24)
+        mean_x = (sum(p[0] for p in pushed["positions"])
+                  / pushed["count"])
+        self.assertGreater(mean_x, 10.0)
+        # wind_response 0 ignores the wind entirely.
+        calm = particles_mod.evaluate_emitter(
+            scene_mod.default_emitter_params(
+                dict(base, wind_response=0.0)), world=world,
+            frame=24)
+        for pos in calm["positions"]:
+            self.assertEqual(pos[0], 0.0)
+
+    def test_gust_deterministic_and_time_varying(self):
+        base = {"gravity_factor": 0.0, "speed": 0.0, "rate": 10.0,
+                "lifetime": 2.0, "turbulence": 0.0,
+                "wind_response": 1.0}
+        world = scene_mod.default_world({
+            "wind": [100.0, 0.0, 0.0],
+            "wind_gust": {"amplitude": 500.0, "frequency": 0.5}})
+        first = particles_mod.evaluate_emitter(
+            scene_mod.default_emitter_params(base), world=world,
+            frame=24)
+        second = particles_mod.evaluate_emitter(
+            scene_mod.default_emitter_params(base), world=world,
+            frame=24)
+        self.assertEqual(first, second)
+        calm = particles_mod.evaluate_emitter(
+            scene_mod.default_emitter_params(base),
+            world=scene_mod.default_world(
+                {"wind": [100.0, 0.0, 0.0]}), frame=24)
+        self.assertNotEqual(first["positions"], calm["positions"])
+
+    def test_turbulence_wobble_deterministic(self):
+        base = {"gravity_factor": 0.0, "speed": 0.0, "rate": 10.0,
+                "lifetime": 2.0}
+        wobbly = particles_mod.evaluate_emitter(
+            scene_mod.default_emitter_params(
+                dict(base, turbulence=10.0)), frame=24)
+        again = particles_mod.evaluate_emitter(
+            scene_mod.default_emitter_params(
+                dict(base, turbulence=10.0)), frame=24)
+        self.assertEqual(wobbly, again)
+        still = particles_mod.evaluate_emitter(
+            scene_mod.default_emitter_params(
+                dict(base, turbulence=0.0)), frame=24)
+        self.assertNotEqual(wobbly["positions"], still["positions"])
+
+    def test_cap_keeps_youngest(self):
+        # Rate 5000 x life 2 s = 10,000 alive, capped at 2,000.
+        params = scene_mod.default_emitter_params({
+            "rate": 5000.0, "lifetime": 2.0, "lifetime_spread": 0.0})
+        result = particles_mod.evaluate_emitter(params, frame=48)
+        self.assertTrue(result["capped"])
+        self.assertEqual(result["count"], 2000)
+        self.assertEqual(result["dropped"], 8000)
+        # Kept indices are the highest (youngest) 2,000.
+        self.assertEqual(result["indices"][0],
+                         result["indices"][-1] - 1999)
+        small = particles_mod.evaluate_emitter(
+            scene_mod.default_emitter_params(), frame=24)
+        self.assertFalse(small["capped"])
+        self.assertEqual(small["dropped"], 0)
+
+    def test_rotated_emitter_emits_down(self):
+        base = {"gravity_factor": 0.0, "speed": 100.0, "spread": 0.0,
+                "speed_spread": 0.0, "rate": 10.0, "lifetime": 2.0,
+                "turbulence": 0.0}
+        up = particles_mod.evaluate_emitter(
+            scene_mod.default_emitter_params(base), frame=12)
+        self.assertAlmostEqual(up["positions"][0][2], 50.0, places=6)
+        down = particles_mod.evaluate_emitter(
+            scene_mod.default_emitter_params(base), frame=12,
+            rotation=(180.0, 0.0, 0.0))
+        self.assertAlmostEqual(down["positions"][0][2], -50.0,
+                               places=6)
+
+    def test_box_spawn_within_volume(self):
+        params = scene_mod.default_emitter_params({
+            "shape": "box", "box_size": [100.0, 60.0, 40.0],
+            "speed": 0.0, "gravity_factor": 0.0, "rate": 60.0,
+            "lifetime": 2.0, "turbulence": 0.0})
+        result = particles_mod.evaluate_emitter(params, frame=24)
+        self.assertGreater(result["count"], 10)
+        for pos in result["positions"]:
+            self.assertLessEqual(abs(pos[0]), 50.0)
+            self.assertLessEqual(abs(pos[1]), 30.0)
+            self.assertLessEqual(abs(pos[2]), 20.0)
+
+    def test_sphere_spawn_within_radius(self):
+        params = scene_mod.default_emitter_params({
+            "shape": "sphere", "sphere_radius": 30.0,
+            "speed": 0.0, "gravity_factor": 0.0, "rate": 60.0,
+            "lifetime": 2.0, "turbulence": 0.0})
+        result = particles_mod.evaluate_emitter(params, frame=24)
+        self.assertGreater(result["count"], 10)
+        for pos in result["positions"]:
+            dist = math.sqrt(sum(v * v for v in pos))
+            self.assertLessEqual(dist, 30.0 + 1e-9)
+
+    def test_evaluate_scene_emitters(self):
+        scene = scene_mod.new_scene("t16")
+        fire = scene_mod.new_emitter("Fire")
+        fire["emitter"] = particles_mod.apply_preset(None, "fire")
+        smoke = scene_mod.new_emitter("Smoke")
+        smoke["emitter"] = particles_mod.apply_preset(None, "smoke")
+        box = scene_mod.new_object("box", name="Box")
+        scene["objects"] = [fire, smoke, box]
+        out = particles_mod.evaluate_scene_emitters(scene, 24)
+        self.assertEqual(set(out["emitters"]),
+                         {fire["id"], smoke["id"]})
+        self.assertEqual(out["total"],
+                         sum(r["count"]
+                             for r in out["emitters"].values()))
+        self.assertFalse(out["scene_capped"])
+
+    def test_animated_emitter_spawns_at_birth_position(self):
+        # The emitter moves from x=0 (frame 0) to x=100 (frame 24).
+        # Particle 0 is born at frame 0, so it spawns at x=0 and
+        # stays there (no speed, no gravity); the particle born at
+        # frame 24 spawns at x=100. Particles never teleport with
+        # a moving emitter.
+        scene = scene_mod.new_scene("t16")
+        emitter = scene_mod.new_emitter("Mover")
+        emitter["emitter"] = scene_mod.default_emitter_params({
+            "speed": 0.0, "gravity_factor": 0.0, "rate": 24.0,
+            "lifetime": 2.0, "turbulence": 0.0})
+        scene["objects"] = [emitter]
+        anim_mod.set_key(scene, emitter["id"], "position", 0,
+                         [0.0, 0.0, 0.0])
+        anim_mod.set_key(scene, emitter["id"], "position", 24,
+                         [100.0, 0.0, 0.0])
+        out = particles_mod.evaluate_scene_emitters(scene, 24)
+        result = out["emitters"][emitter["id"]]
+        self.assertEqual(result["positions"][0], (0.0, 0.0, 0.0))
+        self.assertEqual(result["positions"][-1], (100.0, 0.0, 0.0))
+
+    def test_seed_changes_output(self):
+        base = {"rate": 60.0, "lifetime": 1.0}
+        first = particles_mod.evaluate_emitter(
+            scene_mod.default_emitter_params(dict(base, seed=0)),
+            frame=24)
+        again = particles_mod.evaluate_emitter(
+            scene_mod.default_emitter_params(dict(base, seed=0)),
+            frame=24)
+        self.assertEqual(first, again)
+        other = particles_mod.evaluate_emitter(
+            scene_mod.default_emitter_params(dict(base, seed=1)),
+            frame=24)
+        self.assertNotEqual(first["positions"], other["positions"])
+
+    def test_rate_zero_emits_nothing(self):
+        result = particles_mod.evaluate_emitter(
+            scene_mod.default_emitter_params({"rate": 0.0}), frame=24)
+        self.assertEqual(result["count"], 0)
+        self.assertEqual(result["positions"], [])
+
+    def test_scene_soft_cap_reported(self):
+        # Six emitters at 2,000 live each trip the 10,000
+        # scene-wide soft cap (each is capped individually first).
+        scene = scene_mod.new_scene("t16")
+        for i in range(6):
+            emitter = scene_mod.new_emitter(f"E{i}")
+            emitter["emitter"] = scene_mod.default_emitter_params({
+                "rate": 3000.0, "lifetime": 1.5,
+                "lifetime_spread": 0.0})
+            scene["objects"].append(emitter)
+        out = particles_mod.evaluate_scene_emitters(scene, 48)
+        self.assertEqual(out["total"], 12000)
+        self.assertTrue(out["scene_capped"])
+
+
+@unittest.skipUnless(QT_TESTS, "needs LIGHT_ENGINE_QT_TESTS=1")
+class QtEmitterTests(unittest.TestCase):
+    """T16: a scene with an emitter opens in the window (the emitter
+    renders as its small marker box until T17 draws particles)."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6 import QtWidgets
+        cls._app = QtWidgets.QApplication.instance()
+        if cls._app is None:
+            cls._app = QtWidgets.QApplication([])
+        from light_engine.window import MainWindow
+        cls.MainWindow = MainWindow
+
+    def _scene_with_emitter(self):
+        scene = scene_mod.load_scene(str(EXAMPLE))
+        emitter = scene_mod.new_emitter("Fire")
+        emitter["emitter"] = particles_mod.apply_preset(None, "fire")
+        scene["objects"].append(emitter)
+        return scene, emitter
+
+    def test_window_opens_scene_with_emitter(self):
+        scene, emitter = self._scene_with_emitter()
+        window = self.MainWindow(scene=scene)
+        self.assertEqual(window.windowTitle(), "Reblend — v0.2")
+        names = [window._outliner.item(i).text()
+                 for i in range(window._outliner.count())]
+        self.assertIn("Fire (box)", names)
+        self.assertEqual(window._outliner.count(),
+                         len(scene["objects"]))
+        window.close()
+
+    def test_selecting_emitter_does_not_crash(self):
+        from PySide6 import QtCore, QtWidgets
+        scene, emitter = self._scene_with_emitter()
+        window = self.MainWindow(scene=scene)
+        window.resize(800, 600)
+        window.show()
+        for _ in range(10):
+            QtWidgets.QApplication.processEvents()
+            QtCore.QThread.msleep(50)
+        window._select(emitter["id"])
+        for _ in range(10):
+            QtWidgets.QApplication.processEvents()
+            QtCore.QThread.msleep(50)
+        self.assertEqual(window.selected_id, emitter["id"])
+        self.assertEqual(window._name_edit.text(), "Fire")
         window.close()
 
 

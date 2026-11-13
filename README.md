@@ -56,6 +56,15 @@ base color, roughness, metalness, and one procedural texture
 (none, wood_grain, brushed_metal, worn_leather). Procedural textures are
 generated in code; no image files are used.
 
+Emitters (T16) are objects of kind `emitter`: a particle source with
+a shape (point / box / sphere / cone), rate, lifetime, speed, size,
+colors, opacity fade, gravity factor, drag, wind response, seed, and
+preset (fire / smoke / sparks / rain / snow / dust / water). The
+particle motion is an analytic closed-form sim — scrubbing to any
+frame gives identical particles — and the scene's top-level `world`
+section holds the gravity and wind it runs under. Particle rendering
+arrives in T17; until then an emitter shows as its small marker box.
+
 ## Budgets
 
 The status line shows the object count and triangle count. Past a soft

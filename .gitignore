@@ -1,0 +1,40 @@
+# Secrets and local credentials — NEVER in code, NEVER committed.
+# (Standing rule, 2026-11-13: sensitive info and APIs live in
+# gitignored files only.)
+.env
+.env.*
+*.env
+providers.json
+local-config.json
+*.local.json
+credentials.json
+*credentials*
+*secret*
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+*.p12
+*.pfx
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Qt / build
+*.o
+*.so
+build/
+dist/
+
+# Local run state
+*.log
+*.pid
+.DS_Store
+Thumbs.db
+
+# Reblend local files
+.local/
