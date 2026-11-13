@@ -30,7 +30,8 @@ given, the example tabletop scene opens.
   switch the gizmo drawn on the selected object. Drag a handle to
   move, rotate, or scale the selected object along that axis; the
   hovered handle brightens, Shift snaps (10 cm / 15 degrees / 0.1),
-  and the inspector follows the drag live. Exported frames never
+  and the inspector follows the drag live. Each drag is a single
+  undo step, however far it moves. Exported frames never
   include the gizmo.
 - Add panel: add a primitive. Inspector: move, rotate, scale, and edit
   the selected object's material. Duplicate / Delete act on the selection.
@@ -40,7 +41,7 @@ given, the example tabletop scene opens.
   Export scene as .obj, Export mesh as .glb, Export scene as .glb,
   Render still to PNG, Export frames to a folder (one PNG per
   frame).
-- Edit menu: Undo (up to 50 steps).
+- Edit menu: Undo / Redo (up to 50 steps each).
 
 ## Scene format
 

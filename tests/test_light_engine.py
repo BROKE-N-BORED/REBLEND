@@ -4,6 +4,7 @@ Run from the reblend folder:  bash test.sh
 Qt tests run only when LIGHT_ENGINE_QT_TESTS=1 (they need a display;
 under Xvfb + xcb, QOpenGLWidget works — it does not under offscreen).
 """
+import base64
 import json
 import math
 import os
@@ -33,7 +34,35 @@ EXAMPLE = HERE / "examples" / "tavern-tabletop.json"
 MESH_DEMO = HERE / "examples" / "mesh-demo.json"
 GEM_ASSET = HERE / "examples" / "assets" / "gem.mesh.json"
 HOUSE_OBJ = HERE / "examples" / "house.obj"
-SAMPLE_GLB = HERE / "examples" / "sample.glb"
+
+
+_SAMPLE_TMPDIR = None
+
+
+def _sample_glb_path():
+    """The sample.glb path. The repo carries only sample.glb.b64 (the
+    snapshot push cannot carry binaries), so a fresh clone has no
+    sample.glb — decode the .b64 in that case. The decoded file is
+    named sample.glb inside a temp dir (held for the run): the import
+    names its assets from the source file's stem, so a random temp
+    name would break the asset-name assertions. When neither file
+    exists the real path is returned and the sample tests fail as
+    before (a missing fixture, not an import error)."""
+    global _SAMPLE_TMPDIR
+    real = HERE / "examples" / "sample.glb"
+    if real.exists():
+        return real
+    b64 = HERE / "examples" / "sample.glb.b64"
+    if b64.exists():
+        _SAMPLE_TMPDIR = tempfile.TemporaryDirectory(
+            prefix="reblend-sample-")
+        path = Path(_SAMPLE_TMPDIR.name) / "sample.glb"
+        path.write_bytes(base64.b64decode(b64.read_text()))
+        return path
+    return real
+
+
+SAMPLE_GLB = _sample_glb_path()
 QT_TESTS = os.environ.get("LIGHT_ENGINE_QT_TESTS") == "1"
 
 
@@ -1996,6 +2025,25 @@ class GlbImportTests(unittest.TestCase):
         self.assertEqual(len(pyramid["mesh"]["indices"]) // 3, 6)
         self.assertEqual(len(pyramid["mesh"]["positions"]) // 3, 16)
         self.assertTrue(all(v == 0.0 for v in pyramid["mesh"]["uvs"]))
+
+    def test_sample_b64_decodes_to_the_sample(self):
+        """The repo carries only sample.glb.b64 (no binaries in the
+        snapshot push). It must decode to the same sample — 2
+        objects, 18 triangles — or a fresh clone runs a red suite."""
+        b64 = HERE / "examples" / "sample.glb.b64"
+        with tempfile.NamedTemporaryFile(
+                delete=False, suffix=".glb") as tmp:
+            tmp.write(base64.b64decode(b64.read_text()))
+            tmp_path = tmp.name
+        try:
+            objects, report = meshio.import_mesh(tmp_path)
+        finally:
+            os.unlink(tmp_path)
+        self.assertEqual(report["objects"], 2)
+        self.assertEqual(report["triangles"], 18)
+        self.assertEqual(report["warnings"], [])
+        self.assertEqual({o["name"] for o in objects},
+                         {"Crate", "Pyramid"})
 
     def test_coordinate_conversion(self):
         """glTF Y-up in meters -> Reblend Z-up in cm: (x, y, z) ->
@@ -4638,6 +4686,462 @@ class QtGizmoDragTests(unittest.TestCase):
         self.assertEqual(key0, mug["position"])
         center = vp._gizmo_center()
         self.assertAlmostEqual(center[0], mug["position"][0], delta=0.01)
+        window.close()
+
+
+@unittest.skipUnless(QT_TESTS, "needs LIGHT_ENGINE_QT_TESTS=1 + a display")
+class QtGizmoUndoTests(unittest.TestCase):
+    """T14: one undo step per gizmo drag, via the window's live-edit
+    pattern (arm on drag start, commit on release). Driven through
+    real mouse events on the tavern mug, like the T13 drag tests.
+    Undo restores the pre-drag values EXACTLY (the snapshot is a
+    scene copy, so assertEqual — not AlmostEqual — is the right
+    check), and redo restores the dragged values exactly. Edge
+    cases: a press with no movement pushes no step, a drag that
+    ends where it started pushes no step, and a keyed-frame drag
+    undoes the key with the base (the snapshot covers the whole
+    scene, keys included)."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6 import QtWidgets
+        cls._app = QtWidgets.QApplication.instance()
+        if cls._app is None:
+            cls._app = QtWidgets.QApplication([])
+        from light_engine.window import MainWindow
+        cls.MainWindow = MainWindow
+
+    def _open_tavern(self):
+        scene = scene_mod.load_scene(str(EXAMPLE))
+        window = self.MainWindow(scene=scene)
+        window.resize(800, 600)
+        window.show()
+        self._pump()
+        return window
+
+    def _pump(self, rounds=20):
+        from PySide6 import QtCore, QtWidgets
+        for _ in range(rounds):
+            QtWidgets.QApplication.processEvents()
+            QtCore.QThread.msleep(50)
+
+    def _reload(self, window):
+        """Fresh tavern scene in the same window (resets the mug's
+        base transform AND its keys between drag cases)."""
+        window.scene = scene_mod.load_scene(str(EXAMPLE))
+        window._apply_scene_to_ui()
+        window._select("mug")
+        self._pump(5)
+
+    def _screen_point(self, vp, world):
+        """Viewport pixel for a world point (forward projection
+        through the viewport's own matrices)."""
+        from PySide6 import QtCore, QtGui
+        proj, view = vp._matrices()
+        mapped = (proj * view).map(QtGui.QVector3D(*world))
+        x = (mapped.x() + 1.0) / 2.0 * vp.width()
+        y = (1.0 - mapped.y()) / 2.0 * vp.height()
+        return QtCore.QPoint(int(round(x)), int(round(y)))
+
+    def _mug(self, window):
+        return scene_mod.find_object(window.scene, "mug")
+
+    def _handle_point(self, vp, mode, axis):
+        """A world point on the given handle: the move shaft midpoint,
+        the rotate ring at 45 degrees, or the scale cube centre."""
+        from light_engine.viewport import (
+            GIZMO_SCALE_CUBE_CENTER, _gizmo_axis_frame, gizmo_size)
+        center = vp._gizmo_center()
+        size = gizmo_size(vp.distance)
+        u, p, q = _gizmo_axis_frame(axis)
+        if mode == "rotate":
+            return tuple(center[i] + size * (p[i] + q[i]) / math.sqrt(2.0)
+                         for i in range(3))
+        at = 0.5 if mode == "move" else GIZMO_SCALE_CUBE_CENTER
+        return tuple(center[i] + at * size * u[i] for i in range(3))
+
+    def _ring_point(self, vp, axis, degrees):
+        """A world point on the rotate ring at the given angle in the
+        ring's (p, q) frame."""
+        from light_engine.viewport import _gizmo_axis_frame, gizmo_size
+        center = vp._gizmo_center()
+        size = gizmo_size(vp.distance)
+        _u, p, q = _gizmo_axis_frame(axis)
+        a = math.radians(degrees)
+        return tuple(center[i] + size * (math.cos(a) * p[i]
+                                         + math.sin(a) * q[i])
+                     for i in range(3))
+
+    def _drag(self, vp, start_px, end_px):
+        """Press, move, release through QTest."""
+        from PySide6 import QtCore
+        from PySide6.QtTest import QTest
+        QTest.mousePress(vp, QtCore.Qt.LeftButton,
+                         QtCore.Qt.NoModifier, start_px, 30)
+        QTest.mouseMove(vp, end_px, 30)
+        QTest.mouseRelease(vp, QtCore.Qt.LeftButton,
+                           QtCore.Qt.NoModifier, end_px, 30)
+        self._pump(5)
+
+    def _drag_points(self, vp, points):
+        """Press at the first point, move through the rest in order,
+        release at the last one — one gesture, many mouse moves."""
+        from PySide6 import QtCore
+        from PySide6.QtTest import QTest
+        QTest.mousePress(vp, QtCore.Qt.LeftButton,
+                         QtCore.Qt.NoModifier, points[0], 30)
+        for px in points[1:]:
+            QTest.mouseMove(vp, px, 30)
+        QTest.mouseRelease(vp, QtCore.Qt.LeftButton,
+                           QtCore.Qt.NoModifier, points[-1], 30)
+        self._pump(5)
+
+    def _drag_targets(self, vp, mode, axis):
+        """Press and release pixels for one drag of the given handle
+        (the T13 case geometry: 50 cm along the axis, a 90-degree
+        ring sweep, or twice the grab distance)."""
+        from light_engine.viewport import (
+            GIZMO_SCALE_CUBE_CENTER, _gizmo_axis_frame, gizmo_size)
+        u = _gizmo_axis_frame(axis)[0]
+        if mode == "move":
+            grab_world = self._handle_point(vp, mode, axis)
+            px0 = self._screen_point(vp, grab_world)
+            target = tuple(grab_world[i] + 50.0 * u[i] for i in range(3))
+            return px0, self._screen_point(vp, target)
+        if mode == "rotate":
+            return (self._screen_point(vp, self._ring_point(vp, axis, 45.0)),
+                    self._screen_point(vp, self._ring_point(vp, axis, 135.0)))
+        center = vp._gizmo_center()
+        size = gizmo_size(vp.distance)
+        px0 = self._screen_point(vp, self._handle_point(vp, mode, axis))
+        target = tuple(center[i] + 2.0 * GIZMO_SCALE_CUBE_CENTER
+                       * size * u[i] for i in range(3))
+        return px0, self._screen_point(vp, target)
+
+    def _drag_undo_case(self, window, mode, axis):
+        """One drag of the given handle, then undo, then redo. The
+        drag must move the axis (a no-op drag pushes no step, which
+        would make the undo assertions vacuous), the undo must
+        restore the pre-drag values EXACTLY, and the redo must
+        restore the dragged values EXACTLY. Undo replaces the
+        window's scene object, so the mug is re-fetched after each
+        undo/redo."""
+        vp = window._viewport
+        self._reload(window)
+        window._set_gizmo_mode(mode)
+        self._pump(5)
+        group = {"move": "position", "rotate": "rotation",
+                 "scale": "scale"}[mode]
+        idx = ("x", "y", "z").index(axis)
+        mug = self._mug(window)
+        before = list(mug[group])
+        px0, px1 = self._drag_targets(vp, mode, axis)
+        self.assertEqual(vp.pick_gizmo(px0.x(), px0.y()), (axis, mode))
+        stack_before = len(window._undo_stack)
+        self._drag(vp, px0, px1)
+        mug = self._mug(window)
+        dragged = list(mug[group])
+        self.assertNotEqual(dragged[idx], before[idx],
+                            "the drag must move the axis")
+        for j in range(3):
+            if j != idx:
+                self.assertEqual(dragged[j], before[j])
+        # One drag is one undo step, however many mouse moves it took.
+        self.assertEqual(len(window._undo_stack), stack_before + 1)
+        window.undo()
+        mug = self._mug(window)
+        self.assertEqual(list(mug[group]), before)
+        self.assertEqual(list(anim_mod.sample_object(
+            window.scene, mug, window._frame)[group]), before)
+        window.redo()
+        mug = self._mug(window)
+        self.assertEqual(list(mug[group]), dragged)
+        self.assertEqual(list(anim_mod.sample_object(
+            window.scene, mug, window._frame)[group]), dragged)
+        return mug
+
+    # -- the nine drag-undo cases --------------------------------------
+
+    def test_drag_move_x_undo(self):
+        window = self._open_tavern()
+        self._drag_undo_case(window, "move", "x")
+        window.close()
+
+    def test_drag_move_y_undo(self):
+        window = self._open_tavern()
+        self._drag_undo_case(window, "move", "y")
+        window.close()
+
+    def test_drag_move_z_undo(self):
+        window = self._open_tavern()
+        self._drag_undo_case(window, "move", "z")
+        window.close()
+
+    def test_drag_rotate_x_undo(self):
+        window = self._open_tavern()
+        self._drag_undo_case(window, "rotate", "x")
+        window.close()
+
+    def test_drag_rotate_y_undo(self):
+        window = self._open_tavern()
+        self._drag_undo_case(window, "rotate", "y")
+        window.close()
+
+    def test_drag_rotate_z_undo(self):
+        window = self._open_tavern()
+        self._drag_undo_case(window, "rotate", "z")
+        window.close()
+
+    def test_drag_scale_x_undo(self):
+        window = self._open_tavern()
+        self._drag_undo_case(window, "scale", "x")
+        window.close()
+
+    def test_drag_scale_y_undo(self):
+        window = self._open_tavern()
+        self._drag_undo_case(window, "scale", "y")
+        window.close()
+
+    def test_drag_scale_z_undo(self):
+        window = self._open_tavern()
+        self._drag_undo_case(window, "scale", "z")
+        window.close()
+
+    # -- one step per gesture, however many moves ----------------------
+
+    def test_drag_is_one_undo_step(self):
+        window = self._open_tavern()
+        vp = window._viewport
+        self._reload(window)
+        mug = self._mug(window)
+        before = list(mug["position"])
+        px0, px1 = self._drag_targets(vp, "move", "x")
+        # Five moves in one gesture: the stack must grow by one.
+        mid = [(px0.x() + (px1.x() - px0.x()) * k // 4,
+                px0.y() + (px1.y() - px0.y()) * k // 4)
+               for k in range(1, 4)]
+        from PySide6 import QtCore
+        points = [px0] + [QtCore.QPoint(x, y) for x, y in mid] + [px1]
+        self._drag_points(vp, points)
+        mug = self._mug(window)
+        self.assertNotEqual(mug["position"][0], before[0])
+        self.assertEqual(len(window._undo_stack), 1)
+        window.undo()
+        self.assertEqual(list(self._mug(window)["position"]), before)
+        window.close()
+
+    # -- no change, no step --------------------------------------------
+
+    def test_press_without_moving_pushes_no_step(self):
+        from PySide6 import QtCore
+        from PySide6.QtTest import QTest
+        window = self._open_tavern()
+        vp = window._viewport
+        self._reload(window)
+        mug = self._mug(window)
+        before = list(mug["position"])
+        px = self._screen_point(vp, self._handle_point(vp, "move", "x"))
+        QTest.mousePress(vp, QtCore.Qt.LeftButton,
+                         QtCore.Qt.NoModifier, px, 30)
+        QTest.mouseRelease(vp, QtCore.Qt.LeftButton,
+                           QtCore.Qt.NoModifier, px, 30)
+        self._pump(5)
+        self.assertEqual(len(window._undo_stack), 0)
+        window.undo()  # nothing to undo: a no-op, values untouched
+        self.assertEqual(list(self._mug(window)["position"]), before)
+        window.close()
+
+    def test_drag_out_and_back_pushes_no_step(self):
+        window = self._open_tavern()
+        vp = window._viewport
+        self._reload(window)
+        mug = self._mug(window)
+        before = list(mug["position"])
+        px0, px1 = self._drag_targets(vp, "move", "x")
+        # Out to the target and back to the exact press pixel: the
+        # drag math is deterministic, so the value lands back on the
+        # start exactly and the commit finds nothing to push.
+        self._drag_points(vp, [px0, px1, px0])
+        self.assertEqual(list(self._mug(window)["position"]), before)
+        self.assertEqual(len(window._undo_stack), 0)
+        window.close()
+
+    # -- keys -----------------------------------------------------------
+
+    def test_keyed_frame_drag_undo_restores_key(self):
+        # The mug has a position key at frame 0. A drag there moves
+        # the key with the base (T13); undo must restore BOTH, and
+        # redo must move both back — the snapshot covers the keys.
+        window = self._open_tavern()
+        vp = window._viewport
+        self._reload(window)
+        mug = self._mug(window)
+        before = list(mug["position"])
+        keys = anim_mod.get_keys(window.scene, "mug", "position")
+        key_before = list(next(v for f, v in keys if f == 0))
+        self.assertEqual(key_before, before)
+        px0, px1 = self._drag_targets(vp, "move", "x")
+        self._drag(vp, px0, px1)
+        mug = self._mug(window)
+        dragged = list(mug["position"])
+        self.assertNotEqual(dragged[0], before[0])
+        keys = anim_mod.get_keys(window.scene, "mug", "position")
+        self.assertEqual(list(next(v for f, v in keys if f == 0)),
+                         dragged)
+        window.undo()
+        mug = self._mug(window)
+        self.assertEqual(list(mug["position"]), before)
+        keys = anim_mod.get_keys(window.scene, "mug", "position")
+        self.assertEqual(list(next(v for f, v in keys if f == 0)), before)
+        window.redo()
+        mug = self._mug(window)
+        self.assertEqual(list(mug["position"]), dragged)
+        keys = anim_mod.get_keys(window.scene, "mug", "position")
+        self.assertEqual(list(next(v for f, v in keys if f == 0)),
+                         dragged)
+        window.close()
+
+    def test_interpolated_frame_drag_undo(self):
+        # Frame 24 sits between the mug's position keys at 0 and 48:
+        # a drag there edits the base only (no key at 24, and a drag
+        # never creates one). Undo must restore the base exactly and
+        # leave both keys untouched.
+        window = self._open_tavern()
+        vp = window._viewport
+        self._reload(window)
+        window.set_frame(24)
+        self._pump(5)
+        mug = self._mug(window)
+        before = list(mug["position"])
+        keys = anim_mod.get_keys(window.scene, "mug", "position")
+        key0 = list(next(v for f, v in keys if f == 0))
+        key48 = list(next(v for f, v in keys if f == 48))
+        px0, px1 = self._drag_targets(vp, "move", "x")
+        self._drag(vp, px0, px1)
+        mug = self._mug(window)
+        self.assertNotEqual(mug["position"][0], before[0])
+        keys = anim_mod.get_keys(window.scene, "mug", "position")
+        self.assertEqual(list(next(v for f, v in keys if f == 0)), key0)
+        self.assertEqual(list(next(v for f, v in keys if f == 48)), key48)
+        window.undo()
+        mug = self._mug(window)
+        self.assertEqual(list(mug["position"]), before)
+        keys = anim_mod.get_keys(window.scene, "mug", "position")
+        self.assertEqual(list(next(v for f, v in keys if f == 0)), key0)
+        self.assertEqual(list(next(v for f, v in keys if f == 48)), key48)
+        window.close()
+
+    def test_no_key_track_drag_undo(self):
+        # The mug's scale track has no keys at all: a scale drag
+        # edits the base only, and undo restores it exactly.
+        window = self._open_tavern()
+        vp = window._viewport
+        self._reload(window)
+        window._set_gizmo_mode("scale")
+        self._pump(5)
+        self.assertEqual(
+            anim_mod.get_keys(window.scene, "mug", "scale"), [])
+        mug = self._mug(window)
+        before = list(mug["scale"])
+        px0, px1 = self._drag_targets(vp, "scale", "x")
+        self._drag(vp, px0, px1)
+        mug = self._mug(window)
+        self.assertNotEqual(mug["scale"][0], before[0])
+        window.undo()
+        self.assertEqual(list(self._mug(window)["scale"]), before)
+        window.close()
+
+    # -- redo discipline -------------------------------------------------
+
+    def test_redo_cleared_by_new_edit(self):
+        # Drag, undo, then drag again: the second drag is a new edit,
+        # so the redo stack (which held the first drag) is cleared —
+        # redo after it is a no-op and the second drag's result stays.
+        window = self._open_tavern()
+        vp = window._viewport
+        self._reload(window)
+        px0, px1 = self._drag_targets(vp, "move", "x")
+        self._drag(vp, px0, px1)
+        window.undo()
+        self.assertEqual(len(window._redo_stack), 1)
+        px0, px1 = self._drag_targets(vp, "move", "x")
+        self._drag(vp, px0, px1)
+        second = list(self._mug(window)["position"])
+        self.assertEqual(len(window._redo_stack), 0)
+        window.redo()
+        self.assertEqual(list(self._mug(window)["position"]), second)
+        window.close()
+
+    def test_undo_redo_undo(self):
+        # Drag, undo, redo, undo: the object ends back where it
+        # started, and redo is available again after the second undo.
+        window = self._open_tavern()
+        vp = window._viewport
+        self._reload(window)
+        mug = self._mug(window)
+        before = list(mug["position"])
+        px0, px1 = self._drag_targets(vp, "move", "x")
+        self._drag(vp, px0, px1)
+        dragged = list(self._mug(window)["position"])
+        window.undo()
+        self.assertEqual(list(self._mug(window)["position"]), before)
+        window.redo()
+        self.assertEqual(list(self._mug(window)["position"]), dragged)
+        window.undo()
+        self.assertEqual(list(self._mug(window)["position"]), before)
+        window.redo()
+        self.assertEqual(list(self._mug(window)["position"]), dragged)
+        window.close()
+
+    def test_undo_keeps_selection_and_gizmo(self):
+        # Undo replaces the scene, and set_scene clears the
+        # viewport's selection — undo/redo must re-sync it, or the
+        # gizmo vanishes after an undo even though the outliner
+        # still shows the object selected. Found by the
+        # redo-cleared test, which drags again after an undo.
+        window = self._open_tavern()
+        vp = window._viewport
+        self._reload(window)
+        px0, px1 = self._drag_targets(vp, "move", "x")
+        self._drag(vp, px0, px1)
+        window.undo()
+        self.assertEqual(window.selected_id, "mug")
+        self.assertEqual(vp.selected_id, "mug")
+        self.assertIsNotNone(vp._gizmo_center())
+        window.redo()
+        self.assertEqual(vp.selected_id, "mug")
+        self.assertIsNotNone(vp._gizmo_center())
+        window.close()
+
+    def test_undo_keeps_camera(self):
+        # Undo/redo restore the scene, not the view: set_scene
+        # re-fits the camera (frame() re-centers on the scene
+        # centroid and resets the orbit angles), so undo/redo must
+        # preserve the camera across the re-apply — otherwise
+        # undoing a move yanks the view a pixel or two (the moved
+        # object shifts the centroid) and resets an orbited view
+        # to the defaults. Found by the T14 shot check: the redone
+        # move-x shot differed from the dragged shot by a ~2px
+        # global shift until this fix.
+        window = self._open_tavern()
+        vp = window._viewport
+        self._reload(window)
+        vp.target = (10.0, 20.0, 30.0)
+        vp.distance = 500.0
+        vp.azimuth = -100.0
+        vp.elevation = 45.0
+        self._pump(5)
+        camera = (vp.target, vp.distance, vp.azimuth, vp.elevation)
+        px0, px1 = self._drag_targets(vp, "move", "x")
+        self._drag(vp, px0, px1)
+        self.assertEqual((vp.target, vp.distance, vp.azimuth,
+                          vp.elevation), camera)
+        window.undo()
+        self.assertEqual((vp.target, vp.distance, vp.azimuth,
+                          vp.elevation), camera)
+        window.redo()
+        self.assertEqual((vp.target, vp.distance, vp.azimuth,
+                          vp.elevation), camera)
         window.close()
 
 

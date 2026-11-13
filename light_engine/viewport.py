@@ -27,7 +27,9 @@ the draw uses), a press on a handle drags that axis — Move on a
 camera-perpendicular plane, Rotate on the ring plane, Scale by
 distance from the centre — Shift snaps (10 cm / 15 deg / 0.1), the
 hovered handle brightens, and the inspector follows live. Drags
-write the transform directly; undo for a drag is T14.
+write the transform directly; one undo step per drag (T14), armed
+on press and committed on release through the window's live-edit
+snapshot.
 
 Units are cm, z-up.
 """
@@ -314,6 +316,11 @@ class Viewport(QOpenGLWidget):
     # inspector from the object, so the spin boxes follow the drag
     # live. No payload — the selected object is the one that moved.
     transform_changed = QtCore.Signal()
+    # Gizmo-drag undo (T14): the window arms its live-edit snapshot
+    # when a drag starts and commits it as one undo step when the
+    # drag ends. No payload — the snapshot covers the whole scene.
+    gizmo_drag_started = QtCore.Signal()
+    gizmo_drag_finished = QtCore.Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1433,6 +1440,9 @@ class Viewport(QOpenGLWidget):
         self._gizmo_drag = state
         # The dragged handle stays bright for the whole drag.
         self._gizmo_hover = axis
+        # T14: the window snapshots the pre-drag scene now, so the
+        # whole drag commits as one undo step on release.
+        self.gizmo_drag_started.emit()
         self.update()
         return True
 
@@ -1566,10 +1576,12 @@ class Viewport(QOpenGLWidget):
                 and event.button() == QtCore.Qt.LeftButton:
             # End of a gizmo drag (T13): no re-pick — the press never
             # selected anything, and the object under the handle is
-            # not the user's target. (No undo step is pushed here;
-            # that is T14's job.)
+            # not the user's target. T14: the window commits the
+            # live-edit snapshot as one undo step (skipped when the
+            # drag changed nothing — a press with no movement).
             self._gizmo_drag = None
             self._gizmo_hover = None
+            self.gizmo_drag_finished.emit()
             self.update()
             super().mouseReleaseEvent(event)
             return

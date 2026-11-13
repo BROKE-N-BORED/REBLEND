@@ -113,6 +113,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scene_path = scene_path
         self.selected_id = None
         self._undo_stack = []
+        # Redo (T14): the scene as it was before an undo, so redo
+        # restores it. Same scene-copy model as undo, same 50 cap.
+        # Any new edit clears it — redo only replays undone edits.
+        self._redo_stack = []
         self._live_edit_snapshot = None  # pre-edit scene for live controls
         self._playing = False
         self._frame = 0
@@ -188,6 +192,10 @@ class MainWindow(QtWidgets.QMainWindow):
         undo_action.setShortcut(QtGui.QKeySequence.Undo)
         undo_action.triggered.connect(self.undo)
         edit_menu.addAction(undo_action)
+        redo_action = QtGui.QAction("Redo", self)
+        redo_action.setShortcut(QtGui.QKeySequence.Redo)
+        redo_action.triggered.connect(self.redo)
+        edit_menu.addAction(redo_action)
 
     def _build_left(self):
         pane = QtWidgets.QWidget()
@@ -227,6 +235,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # while it writes the spin boxes, so the values cannot feed
         # back into _on_transform_edited.
         self._viewport.transform_changed.connect(self._refresh_inspector)
+        # Gizmo-drag undo (T14): one undo step per drag gesture, via
+        # the existing live-edit pattern — arm on drag start (the
+        # snapshot holds the pre-drag scene), commit on release.
+        self._viewport.gizmo_drag_started.connect(self._arm_live_edit)
+        self._viewport.gizmo_drag_finished.connect(self._commit_live_edit)
         # Gizmo toolbar (T12): mode buttons above the viewport + W/E/R
         # shortcuts (Blender convention). The shortcuts live on the
         # centre pane with WidgetWithChildrenShortcut, so they fire
@@ -524,17 +537,68 @@ class MainWindow(QtWidgets.QMainWindow):
         self._commit_live_edit()
         self._undo_stack.append(scene_copy(self.scene))
         del self._undo_stack[:-50]
+        # A new edit invalidates everything undone before it (T14).
+        self._redo_stack.clear()
 
     def undo(self):
         self._live_edit_snapshot = None
         if not self._undo_stack:
             self.statusBar().showMessage("Nothing to undo")
             return
+        # T14: the current scene goes on the redo stack, so redo
+        # restores exactly the state this undo leaves behind.
+        self._redo_stack.append(scene_copy(self.scene))
+        del self._redo_stack[:-50]
         self.scene = self._undo_stack.pop()
         if self.selected_id and not find_object(self.scene, self.selected_id):
             self.selected_id = None
-        self._apply_scene_to_ui()
+        self._apply_scene_keep_camera()
+        # _apply_scene_to_ui re-points the viewport at the restored
+        # scene, and set_scene clears the viewport's selection — so
+        # re-sync it, or the gizmo vanishes after an undo even though
+        # the window still shows the object selected (T14: found by
+        # the redo-cleared test, which drags again after an undo).
+        self._viewport.selected_id = self.selected_id
+        self._viewport.update()
         self.statusBar().showMessage("Undone")
+
+    def _apply_scene_keep_camera(self):
+        """Re-apply the scene to the UI without moving the camera
+        (T14). set_scene re-fits the view — frame() re-centers on
+        the scene centroid and resets the orbit angles — which is
+        right for a new or opened scene and wrong for undo/redo:
+        undoing a drag must not yank the user's view back to the
+        default angles, and a moved object shifts the centroid, so
+        without this the view jumps a pixel or two on every undo of
+        a move. The camera is the viewer's state, not the scene's,
+        so it is saved before the re-apply and restored after."""
+        vp = self._viewport
+        camera = (vp.target, vp.distance, vp.azimuth, vp.elevation)
+        self._apply_scene_to_ui()
+        vp.target, vp.distance, vp.azimuth, vp.elevation = camera
+        vp.update()
+
+    def redo(self):
+        """Re-apply the last undone edit (T14). The mirror of undo:
+        the current scene goes back on the undo stack, the redo
+        stack's top becomes the scene. Added with T14 because drag
+        undo is only half the story without it — before T14 there
+        was no redo at all."""
+        self._live_edit_snapshot = None
+        if not self._redo_stack:
+            self.statusBar().showMessage("Nothing to redo")
+            return
+        self._undo_stack.append(scene_copy(self.scene))
+        del self._undo_stack[:-50]
+        self.scene = self._redo_stack.pop()
+        if self.selected_id and not find_object(self.scene, self.selected_id):
+            self.selected_id = None
+        self._apply_scene_keep_camera()
+        # Same re-sync as undo: set_scene clears the viewport's
+        # selection, so restore it from the window's.
+        self._viewport.selected_id = self.selected_id
+        self._viewport.update()
+        self.statusBar().showMessage("Redone")
 
     # -- selection ------------------------------------------------------------
     def _select(self, object_id):
@@ -619,8 +683,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _commit_live_edit(self):
         if self._live_edit_snapshot is not None:
-            self._undo_stack.append(self._live_edit_snapshot)
-            del self._undo_stack[:-50]
+            # A gesture that changed nothing pushes no step (T14):
+            # a press on a gizmo handle with no movement, or a drag
+            # that ends exactly where it started, leaves the undo
+            # stack untouched. Same for a slider grabbed and released
+            # without moving. The snapshot is a full scene copy, so
+            # the comparison covers keys as well as base transforms.
+            if self._live_edit_snapshot != self.scene:
+                self._undo_stack.append(self._live_edit_snapshot)
+                del self._undo_stack[:-50]
+                # A new edit invalidates everything undone before it.
+                self._redo_stack.clear()
             self._live_edit_snapshot = None
 
     def _on_transform_edited(self, group, axis):
