@@ -26,6 +26,10 @@ given, the example tabletop scene opens.
 
 - Left-drag: orbit. Right-drag: pan. Scroll: zoom.
 - Click an object: select it. Frame button: fit the view to the scene.
+- Gizmo toolbar above the viewport: Move (W), Rotate (E), Scale (R)
+  switch the gizmo drawn on the selected object. The gizmo is drawn
+  only — dragging it comes in a later task. Exported frames never
+  include the gizmo.
 - Add panel: add a primitive. Inspector: move, rotate, scale, and edit
   the selected object's material. Duplicate / Delete act on the selection.
 - Timeline: Play / Pause, scrub the slider, Add key / Delete key store

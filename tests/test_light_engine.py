@@ -3620,5 +3620,249 @@ class QtGlbExportTests(unittest.TestCase):
         window.close()
 
 
+class GizmoGeometryTests(unittest.TestCase):
+    """T12: the gizmo geometry is pure functions (no GL), so it is
+    tested headless. Vertex counts are exact — move 78, rotate 288,
+    scale 78 — from the segment counts in viewport.py."""
+
+    def _verts(self, mode):
+        from light_engine.viewport import gizmo_lines
+        flat = gizmo_lines(mode)
+        self.assertEqual(len(flat) % 6, 0)
+        return [(flat[i], flat[i + 1], flat[i + 2],
+                 flat[i + 3], flat[i + 4], flat[i + 5])
+                for i in range(0, len(flat), 6)]
+
+    def test_move_has_three_colored_arrows(self):
+        verts = self._verts("move")
+        self.assertEqual(len(verts), 78)
+        # The X shaft runs from the origin to (0.75, 0, 0), in red.
+        self.assertEqual(verts[0][:3], (0.0, 0.0, 0.0))
+        self.assertEqual(verts[1][:3], (0.75, 0.0, 0.0))
+        self.assertEqual(verts[0][3:], (0.85, 0.25, 0.25))
+        # The Y shaft starts at vertex 26, the Z shaft at 52.
+        self.assertEqual(verts[26][:3], (0.0, 0.0, 0.0))
+        self.assertEqual(verts[27][:3], (0.0, 0.75, 0.0))
+        self.assertEqual(verts[26][3:], (0.25, 0.75, 0.30))
+        self.assertEqual(verts[52][:3], (0.0, 0.0, 0.0))
+        self.assertEqual(verts[53][:3], (0.0, 0.0, 0.75))
+        self.assertEqual(verts[52][3:], (0.30, 0.45, 0.9))
+        # Every vertex is red, green, or blue — one color per axis.
+        colors = {(v[3], v[4], v[5]) for v in verts}
+        self.assertEqual(colors, {(0.85, 0.25, 0.25),
+                                  (0.25, 0.75, 0.30),
+                                  (0.30, 0.45, 0.9)})
+
+    def test_move_cone_apex_and_base(self):
+        verts = self._verts("move")
+        # The X cone apex is (1, 0, 0): the farthest red X vertex.
+        xs = [v[0] for v in verts if v[3:] == (0.85, 0.25, 0.25)]
+        self.assertAlmostEqual(max(xs), 1.0)
+        # The cone base circle sits at x = 0.75 with radius 0.09
+        # (the shaft tip at (0.75, 0, 0) is not a base vertex).
+        base = [v for v in verts
+                if v[3:] == (0.85, 0.25, 0.25)
+                and abs(v[0] - 0.75) < 1e-9
+                and (v[1] != 0.0 or v[2] != 0.0)]
+        self.assertTrue(base)
+        for v in base:
+            self.assertAlmostEqual(math.hypot(v[1], v[2]), 0.09)
+
+    def test_rotate_rings_are_unit_circles(self):
+        verts = self._verts("rotate")
+        self.assertEqual(len(verts), 288)
+        # The X ring lies in the YZ plane (x == 0), radius 1.
+        ring_x = [v for v in verts if v[3:] == (0.85, 0.25, 0.25)]
+        self.assertEqual(len(ring_x), 96)
+        for v in ring_x:
+            self.assertEqual(v[0], 0.0)
+            self.assertAlmostEqual(math.hypot(v[1], v[2]), 1.0)
+        # The Y ring lies in the XZ plane, the Z ring in the XY plane.
+        ring_y = [v for v in verts if v[3:] == (0.25, 0.75, 0.30)]
+        self.assertEqual(len(ring_y), 96)
+        for v in ring_y:
+            self.assertEqual(v[1], 0.0)
+        ring_z = [v for v in verts if v[3:] == (0.30, 0.45, 0.9)]
+        self.assertEqual(len(ring_z), 96)
+        for v in ring_z:
+            self.assertEqual(v[2], 0.0)
+
+    def test_scale_has_lines_and_cubes(self):
+        verts = self._verts("scale")
+        self.assertEqual(len(verts), 78)
+        # The X line runs from the origin to (0.7, 0, 0).
+        self.assertEqual(verts[0][:3], (0.0, 0.0, 0.0))
+        self.assertEqual(verts[1][:3], (0.7, 0.0, 0.0))
+        # The X cube is the next 24 vertices: centred at (0.81, 0, 0)
+        # with half-side 0.11, so x runs 0.70 to 0.92, y/z to +/-0.11.
+        cube_x = verts[2:26]
+        self.assertEqual(len(cube_x), 24)
+        self.assertTrue(all(v[3:] == (0.85, 0.25, 0.25) for v in cube_x))
+        xs = [v[0] for v in cube_x]
+        self.assertAlmostEqual(min(xs), 0.70)
+        self.assertAlmostEqual(max(xs), 0.92)
+        self.assertAlmostEqual(max(abs(v[1]) for v in cube_x), 0.11)
+        self.assertAlmostEqual(max(abs(v[2]) for v in cube_x), 0.11)
+
+    def test_unknown_mode_raises(self):
+        from light_engine.viewport import gizmo_lines
+        with self.assertRaises(ValueError):
+            gizmo_lines("spin")
+
+    def test_gizmo_size_scales_with_distance(self):
+        from light_engine.viewport import gizmo_size
+        self.assertAlmostEqual(gizmo_size(400.0), 2.0 * gizmo_size(200.0))
+        self.assertGreater(gizmo_size(400.0), 0.0)
+
+
+@unittest.skipUnless(QT_TESTS, "Qt tests need LIGHT_ENGINE_QT_TESTS=1")
+class QtGizmoTests(unittest.TestCase):
+    """T12: gizmo modes, toolbar buttons, W/E/R shortcuts, and the
+    render-exclusion rule."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6 import QtWidgets
+        cls._app = QtWidgets.QApplication.instance()
+        if cls._app is None:
+            cls._app = QtWidgets.QApplication([])
+        from light_engine.window import MainWindow
+        cls.MainWindow = MainWindow
+
+    def _open_tavern(self):
+        scene = scene_mod.load_scene(str(EXAMPLE))
+        window = self.MainWindow(scene=scene)
+        window.resize(800, 600)
+        window.show()
+        self._pump()
+        return window
+
+    def _pump(self, rounds=20):
+        from PySide6 import QtCore, QtWidgets
+        for _ in range(rounds):
+            QtWidgets.QApplication.processEvents()
+            QtCore.QThread.msleep(50)
+
+    def _grab_png(self, window):
+        """The viewport framebuffer as PNG bytes. PNG encoding is
+        deterministic, so identical pixels give identical bytes —
+        the same byte-identity check the tavern shots use."""
+        from PySide6 import QtCore
+        image = window._viewport.grabFramebuffer()
+        buf = QtCore.QBuffer()
+        buf.open(QtCore.QBuffer.ReadWrite)
+        image.save(buf, "PNG")
+        return bytes(buf.data())
+
+    def test_default_mode_is_move(self):
+        window = self._open_tavern()
+        self.assertEqual(window._viewport.gizmo_mode, "move")
+        self.assertTrue(window._gizmo_buttons["move"].isChecked())
+        self.assertFalse(window._gizmo_buttons["rotate"].isChecked())
+        self.assertFalse(window._gizmo_buttons["scale"].isChecked())
+        window.close()
+
+    def test_toolbar_buttons_switch_modes(self):
+        window = self._open_tavern()
+        window._gizmo_buttons["rotate"].click()
+        self.assertEqual(window._viewport.gizmo_mode, "rotate")
+        self.assertTrue(window._gizmo_buttons["rotate"].isChecked())
+        self.assertFalse(window._gizmo_buttons["move"].isChecked())
+        window._gizmo_buttons["scale"].click()
+        self.assertEqual(window._viewport.gizmo_mode, "scale")
+        self.assertTrue(window._gizmo_buttons["scale"].isChecked())
+        window.close()
+
+    def test_shortcuts_switch_modes(self):
+        from PySide6 import QtCore
+        from PySide6.QtTest import QTest
+        window = self._open_tavern()
+        vp = window._viewport
+        # Xvfb has no window manager, so show() never activates the
+        # window and setFocus() is a no-op until it is active — on a
+        # real desktop, clicking the viewport focuses it.
+        window.activateWindow()
+        vp.setFocus()
+        self._pump(5)
+        QTest.keyClick(vp, QtCore.Qt.Key_E)
+        self.assertEqual(vp.gizmo_mode, "rotate")
+        QTest.keyClick(vp, QtCore.Qt.Key_R)
+        self.assertEqual(vp.gizmo_mode, "scale")
+        QTest.keyClick(vp, QtCore.Qt.Key_W)
+        self.assertEqual(vp.gizmo_mode, "move")
+        window.close()
+
+    def test_bad_mode_raises_and_keeps_mode(self):
+        window = self._open_tavern()
+        with self.assertRaises(ValueError):
+            window._viewport.set_gizmo_mode("spin")
+        self.assertEqual(window._viewport.gizmo_mode, "move")
+        window.close()
+
+    def test_gizmo_draws_on_selected_object(self):
+        window = self._open_tavern()
+        self._pump(5)
+        before = self._grab_png(window)
+        window._select("mug")
+        self._pump(10)
+        after = self._grab_png(window)
+        self.assertNotEqual(before, after)
+        window.close()
+
+    def test_mode_changes_the_gizmo_draw(self):
+        """The selection box is mode-independent, so a mode change
+        can only alter the grab through the gizmo — this proves the
+        gizmo itself draws, in each mode."""
+        window = self._open_tavern()
+        window._select("mug")
+        self._pump(10)
+        move_png = self._grab_png(window)
+        window._set_gizmo_mode("rotate")
+        self._pump(10)
+        rotate_png = self._grab_png(window)
+        self.assertNotEqual(move_png, rotate_png)
+        window._set_gizmo_mode("scale")
+        self._pump(10)
+        scale_png = self._grab_png(window)
+        self.assertNotEqual(move_png, scale_png)
+        self.assertNotEqual(rotate_png, scale_png)
+        window.close()
+
+    def test_no_gizmo_without_selection(self):
+        window = self._open_tavern()
+        self._pump(5)
+        move_png = self._grab_png(window)
+        window._set_gizmo_mode("rotate")
+        self._pump(10)
+        rotate_png = self._grab_png(window)
+        # No selection, no gizmo: the mode must not change the view.
+        self.assertEqual(move_png, rotate_png)
+        window.close()
+
+    def test_render_frame_to_excludes_gizmo(self):
+        window = self._open_tavern()
+        window._select("mug")
+        self._pump(10)
+        # A live grab with the gizmo suppressed is what a render
+        # must look like; render_frame_to must match it exactly.
+        window._viewport.set_gizmo_suppressed(True)
+        self._pump(5)
+        suppressed = self._grab_png(window)
+        window._viewport.set_gizmo_suppressed(False)
+        self._pump(5)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "frame0.png")
+            self.assertTrue(window.render_frame_to(0, path))
+            with open(path, "rb") as handle:
+                rendered = handle.read()
+        self.assertEqual(rendered, suppressed)
+        # The flag is cleared after the render: the live view still
+        # shows the gizmo.
+        self.assertFalse(window._viewport._gizmo_suppressed)
+        live = self._grab_png(window)
+        self.assertNotEqual(live, suppressed)
+        window.close()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -221,6 +221,33 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setContentsMargins(6, 6, 6, 6)
         self._viewport = Viewport()
         self._viewport.object_selected.connect(self._on_viewport_selected)
+        # Gizmo toolbar (T12): mode buttons above the viewport + W/E/R
+        # shortcuts (Blender convention). The shortcuts live on the
+        # centre pane with WidgetWithChildrenShortcut, so they fire
+        # when the viewport or the camera row has focus — and never
+        # while the user is typing a name or a number in another pane.
+        gizmo_row = QtWidgets.QHBoxLayout()
+        gizmo_row.addWidget(QtWidgets.QLabel("Gizmo:"))
+        self._gizmo_buttons = {}
+        group = QtWidgets.QButtonGroup(self)
+        group.setExclusive(True)
+        for mode, label, key in (("move", "Move (W)", "W"),
+                                 ("rotate", "Rotate (E)", "E"),
+                                 ("scale", "Scale (R)", "R")):
+            btn = QtWidgets.QPushButton(label)
+            btn.setCheckable(True)
+            btn.setChecked(mode == "move")
+            btn.clicked.connect(
+                lambda _c=False, m=mode: self._set_gizmo_mode(m))
+            group.addButton(btn)
+            self._gizmo_buttons[mode] = btn
+            gizmo_row.addWidget(btn)
+            shortcut = QtGui.QShortcut(QtGui.QKeySequence(key), pane)
+            shortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(
+                lambda m=mode: self._set_gizmo_mode(m))
+        gizmo_row.addStretch(1)
+        layout.addLayout(gizmo_row)
         layout.addWidget(self._viewport, 1)
         cam_row = QtWidgets.QHBoxLayout()
         frame_btn = QtWidgets.QPushButton("Frame")
@@ -510,6 +537,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._viewport.update()
         self._refresh_outliner()
         self._refresh_inspector()
+
+    def _set_gizmo_mode(self, mode):
+        """Switch the gizmo mode (T12) from a toolbar button or a
+        W/E/R shortcut. The viewport owns the mode; the buttons just
+        reflect it. setChecked emits toggled, not clicked, so syncing
+        the buttons here cannot re-enter this method."""
+        self._viewport.set_gizmo_mode(mode)
+        self._gizmo_buttons[mode].setChecked(True)
 
     def _on_outliner_changed(self, current, _previous):
         if self._refreshing or current is None:
@@ -965,13 +1000,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def render_frame_to(self, frame, path):
         """Set the frame, grab the viewport, save a PNG. Used by export
-        and by the verification script."""
+        and by the verification script. The gizmo never appears in a
+        render (T12): it is interactive-viewport only, so it is
+        suppressed for the grab and restored after — even if the
+        save fails. (Render still, the File-menu still, grabs the
+        live viewport as-is including the gizmo, the same way it
+        already includes the selection box: what you see is what
+        you get there. Only the frame-export path suppresses it.)"""
         self.set_frame(frame)
-        self._viewport.update()
-        QtWidgets.QApplication.processEvents()
-        QtCore.QCoreApplication.sendPostedEvents()
-        image = self._viewport.grabFramebuffer()
-        return image.save(path)
+        self._viewport.set_gizmo_suppressed(True)
+        try:
+            self._viewport.update()
+            QtWidgets.QApplication.processEvents()
+            QtCore.QCoreApplication.sendPostedEvents()
+            image = self._viewport.grabFramebuffer()
+            return image.save(path)
+        finally:
+            self._viewport.set_gizmo_suppressed(False)
 
     def _export_frames(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(

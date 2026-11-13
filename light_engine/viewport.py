@@ -16,7 +16,12 @@ by resolved path; they cast and receive shadows through the same
 VAOs as primitives. One shadow map (T5): the key light only, a
 1024x1024 depth map rendered each paint from the light's viewpoint,
 sampled in the main pass with a 3x3 PCF. Per-object cast/receive
-flags decide who casts and who receives.
+flags decide who casts and who receives. Gizmo (T12): a Move/Rotate/
+Scale gizmo on the selected object, drawn with the lines program only
+(cones and cubes are wireframe outlines), constant screen size from
+the camera distance, depth test off so it is never hidden inside the
+object. Renders (render_frame_to) suppress it — it is
+interactive-viewport only.
 
 Units are cm, z-up.
 """
@@ -75,6 +80,121 @@ SHADOW_MAP_SIZE = 1024
 # 0.5 cm is far above depth-buffer precision at scene scale and far
 # below anything a user can see.
 GRID_Z = -0.5
+
+# Gizmo (T12): drawn with the lines program only, in unit space centred
+# on the selected object's position; the draw scales it by
+# gizmo_size(distance) so it stays the same size on screen. Axis colors
+# match the grid axes. Cones and cubes are wireframe outlines through
+# the lines program — T12 adds no solid-geometry pass.
+GIZMO_MODES = ("move", "rotate", "scale")
+GIZMO_AXIS_COLORS = {"x": (0.85, 0.25, 0.25),
+                     "y": (0.25, 0.75, 0.30),
+                     "z": (0.30, 0.45, 0.9)}
+# The gizmo's world-space size is distance * this factor. At the
+# 45-degree field of view the visible height at the target plane is
+# about 0.83 * distance, so 0.12 puts the gizmo at roughly 15% of the
+# viewport height whatever the zoom.
+GIZMO_SIZE_FACTOR = 0.12
+GIZMO_RING_SEGMENTS = 48
+GIZMO_CONE_SEGMENTS = 8
+
+
+def gizmo_size(distance):
+    """World-space gizmo size for a camera distance (T12): the gizmo
+    grows with distance so it keeps the same size on screen."""
+    return float(distance) * GIZMO_SIZE_FACTOR
+
+
+def _gizmo_axis_frame(axis):
+    """(unit, perp1, perp2) for an axis: the axis direction and two
+    perpendicular unit vectors, right-handed."""
+    frames = {"x": ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+              "y": ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)),
+              "z": ((0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0))}
+    return frames[axis]
+
+
+def _gizmo_add(verts, a, b, color):
+    verts += [a[0], a[1], a[2], *color, b[0], b[1], b[2], *color]
+
+
+def _gizmo_move_axis(verts, axis):
+    """One move arrow: a shaft from the origin to 0.75, then a cone
+    outline — an 8-segment base circle of radius 0.09 at 0.75 and
+    four side lines to the apex at 1.0."""
+    u, p, q = _gizmo_axis_frame(axis)
+    color = GIZMO_AXIS_COLORS[axis]
+    tip = tuple(0.75 * v for v in u)
+    _gizmo_add(verts, (0.0, 0.0, 0.0), tip, color)
+    base = []
+    for i in range(GIZMO_CONE_SEGMENTS):
+        angle = 2.0 * math.pi * i / GIZMO_CONE_SEGMENTS
+        base.append(tuple(tip[j] + 0.09 * (math.cos(angle) * p[j]
+                                           + math.sin(angle) * q[j])
+                          for j in range(3)))
+    for i in range(GIZMO_CONE_SEGMENTS):
+        _gizmo_add(verts, base[i], base[(i + 1) % GIZMO_CONE_SEGMENTS],
+                   color)
+    for i in range(0, GIZMO_CONE_SEGMENTS, 2):
+        _gizmo_add(verts, base[i], u, color)
+
+
+def _gizmo_rotate_axis(verts, axis):
+    """One rotate ring: a 48-segment circle of radius 1.0 in the
+    plane perpendicular to the axis."""
+    _u, p, q = _gizmo_axis_frame(axis)
+    color = GIZMO_AXIS_COLORS[axis]
+    ring = []
+    for i in range(GIZMO_RING_SEGMENTS):
+        angle = 2.0 * math.pi * i / GIZMO_RING_SEGMENTS
+        ring.append(tuple(math.cos(angle) * p[j] + math.sin(angle) * q[j]
+                          for j in range(3)))
+    for i in range(GIZMO_RING_SEGMENTS):
+        _gizmo_add(verts, ring[i], ring[(i + 1) % GIZMO_RING_SEGMENTS],
+                   color)
+
+
+def _gizmo_scale_axis(verts, axis):
+    """One scale handle: a short line from the origin to 0.7, ending
+    in a small cube outline (side 0.22) centred at 0.81 along the
+    axis."""
+    u, p, q = _gizmo_axis_frame(axis)
+    color = GIZMO_AXIS_COLORS[axis]
+    end = tuple(0.7 * v for v in u)
+    _gizmo_add(verts, (0.0, 0.0, 0.0), end, color)
+    centre = tuple(0.81 * v for v in u)
+    half = 0.11
+    corners = []
+    for su in (-1.0, 1.0):
+        for sp in (-1.0, 1.0):
+            for sq in (-1.0, 1.0):
+                corners.append(tuple(
+                    centre[j] + half * (su * u[j] + sp * p[j] + sq * q[j])
+                    for j in range(3)))
+    # Corner order is (su, sp, sq) with each sign varying slowest to
+    # fastest; the edges join corners differing in exactly one sign.
+    edges = [(0, 1), (2, 3), (4, 5), (6, 7), (0, 2), (1, 3), (4, 6),
+             (5, 7), (0, 4), (1, 5), (2, 6), (3, 7)]
+    for a, b in edges:
+        _gizmo_add(verts, corners[a], corners[b], color)
+
+
+def gizmo_lines(mode):
+    """Interleaved pos(3)+color(3) floats for one gizmo mode, in unit
+    space centred on the origin (T12). The draw scales the unit gizmo
+    by gizmo_size(distance) and translates it to the selected
+    object's position. Raises ValueError on an unknown mode."""
+    builders = {"move": _gizmo_move_axis,
+                "rotate": _gizmo_rotate_axis,
+                "scale": _gizmo_scale_axis}
+    build = builders.get(mode)
+    if build is None:
+        raise ValueError(f"unknown gizmo mode: {mode!r} "
+                         f"(expected one of {', '.join(GIZMO_MODES)})")
+    verts = []
+    for axis in ("x", "y", "z"):
+        build(verts, axis)
+    return verts
 
 
 def _interleaved(mesh):
@@ -190,6 +310,17 @@ class Viewport(QOpenGLWidget):
         self._sel_count = 0
         self._frame = 0
         self.selected_id = None
+        # Gizmo (T12): the transform mode, default Move. One VAO per
+        # mode is built lazily and cached in _gizmo_vaos.
+        # _gizmo_suppressed hides the gizmo while a render is being
+        # grabbed (render_frame_to sets it): the gizmo is
+        # interactive-viewport only and never appears in an exported
+        # frame. The selection box is NOT suppressed — it has always
+        # been part of the grabbed viewport, and T12 does not change
+        # that.
+        self.gizmo_mode = "move"
+        self._gizmo_vaos = {}
+        self._gizmo_suppressed = False
         # Exposure for the ACES tone mapping (T4). Fixed at 1.0 for
         # now — an exposure control is a later item, not T4.
         self._exposure = 1.0
@@ -277,6 +408,29 @@ class Viewport(QOpenGLWidget):
 
     def current_frame(self):
         return self._frame
+
+    # -- gizmo (T12) -----------------------------------------------------
+    def set_gizmo_mode(self, mode):
+        """Switch the gizmo mode: "move", "rotate", or "scale".
+        Raises ValueError on an unknown mode. No-op when the mode is
+        already current — the toolbar buttons and shortcuts both call
+        here, and a redundant call must not repaint."""
+        if mode not in GIZMO_MODES:
+            raise ValueError(
+                f"unknown gizmo mode: {mode!r} "
+                f"(expected one of {', '.join(GIZMO_MODES)})")
+        if mode == self.gizmo_mode:
+            return
+        self.gizmo_mode = mode
+        self.update()
+
+    def set_gizmo_suppressed(self, suppressed):
+        """Hide the gizmo while a render is being grabbed.
+        render_frame_to sets this around its grab and clears it
+        after; either change repaints, so the gizmo comes back in
+        the live view as soon as the grab is done."""
+        self._gizmo_suppressed = bool(suppressed)
+        self.update()
 
     def _destroy_entry(self, entry):
         """Destroy one object's VAO + VBO + optional IBO. Caller must
@@ -387,6 +541,16 @@ class Viewport(QOpenGLWidget):
             except Exception:
                 pass
             self._sel_vbo = None
+        for vao, buf, _count in self._gizmo_vaos.values():
+            try:
+                vao.destroy()
+            except Exception:
+                pass
+            try:
+                buf.destroy()
+            except Exception:
+                pass
+        self._gizmo_vaos = {}
         for tex in self._textures.values():
             try:
                 tex.destroy()
@@ -647,6 +811,8 @@ class Viewport(QOpenGLWidget):
             self._draw_objects(gl, proj, view, light_space)
             if self.selected_id:
                 self._draw_selection(gl, proj, view)
+                if not self._gizmo_suppressed:
+                    self._draw_gizmo(gl, proj, view)
 
     def _light_uniforms(self, prog):
         """Set the pbr_lite light uniforms from the scene lights."""
@@ -985,6 +1151,49 @@ class Viewport(QOpenGLWidget):
         gl.glDrawArrays(GL_LINES, 0, self._sel_count)
         self._sel_vao.release()
         prog.release()
+
+    def _ensure_gizmo_vao(self, mode):
+        """One cached VAO per gizmo mode (T12), built lazily from the
+        unit-space geometry. The draw scales it via the model matrix,
+        so the VAO never needs rebuilding."""
+        entry = self._gizmo_vaos.get(mode)
+        if entry is None:
+            entry = _line_vao(self._gl, gizmo_lines(mode))
+            self._gizmo_vaos[mode] = entry
+        return entry
+
+    def _draw_gizmo(self, gl, proj, view):
+        """The transform gizmo (T12) on the selected object: unit
+        geometry scaled by gizmo_size(distance) — constant screen
+        size — translated to the object's sampled world position
+        (the translation column of its model matrix, so the gizmo
+        follows the animation). Axes are world-aligned in T12; a
+        local-orientation gizmo is a later item, not in the T12
+        spec. Depth test off for the gizmo only, so it is never
+        hidden inside the object; the test is back on before this
+        returns."""
+        obj = next((o for o in self._scene["objects"]
+                    if o["id"] == self.selected_id), None)
+        if obj is None:
+            return
+        model = self._model_matrix(obj)
+        cx, cy, cz = model[0][3], model[1][3], model[2][3]
+        size = gizmo_size(self.distance)
+        qm = QtGui.QMatrix4x4()
+        qm.translate(cx, cy, cz)
+        qm.scale(size, size, size)
+        vao, _buf, count = self._ensure_gizmo_vao(self.gizmo_mode)
+        prog = self._programs["lines"]
+        gl.glDisable(GL_DEPTH_TEST)
+        prog.bind()
+        prog.setUniformValue("uProj", proj)
+        prog.setUniformValue("uView", view)
+        prog.setUniformValue("uModel", qm)
+        vao.bind()
+        gl.glDrawArrays(GL_LINES, 0, count)
+        vao.release()
+        prog.release()
+        gl.glEnable(GL_DEPTH_TEST)
 
     # -- picking ---------------------------------------------------------
     def pick(self, x, y):
