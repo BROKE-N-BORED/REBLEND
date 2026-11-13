@@ -3864,5 +3864,782 @@ class QtGizmoTests(unittest.TestCase):
         window.close()
 
 
+class GizmoPickTests(unittest.TestCase):
+    """T13: the gizmo ray tests are pure functions (no GL), so they
+    are tested headless — plus the proof that the pick geometry
+    matches the drawn geometry, and the hover-highlight colors."""
+
+    def _verts(self, mode, highlight=None):
+        from light_engine.viewport import gizmo_lines
+        flat = gizmo_lines(mode, highlight)
+        self.assertEqual(len(flat) % 6, 0)
+        return [(flat[i], flat[i + 1], flat[i + 2],
+                 flat[i + 3], flat[i + 4], flat[i + 5])
+                for i in range(0, len(flat), 6)]
+
+    def test_ray_vs_plane_hit(self):
+        t = geometry.ray_vs_plane((0.0, 0.0, -10.0), (0.0, 0.0, 1.0),
+                                  (0.0, 0.0, 0.0), (0.0, 0.0, 1.0))
+        self.assertAlmostEqual(t, 10.0)
+
+    def test_ray_vs_plane_parallel(self):
+        t = geometry.ray_vs_plane((0.0, 0.0, 0.0), (1.0, 0.0, 0.0),
+                                  (0.0, 0.0, 5.0), (0.0, 0.0, 1.0))
+        self.assertIsNone(t)
+
+    def test_ray_vs_plane_behind(self):
+        t = geometry.ray_vs_plane((0.0, 0.0, 10.0), (0.0, 0.0, 1.0),
+                                  (0.0, 0.0, 0.0), (0.0, 0.0, 1.0))
+        self.assertIsNone(t)
+
+    def test_ray_vs_cylinder_side_hit(self):
+        # Z-axis cylinder z=0..10, radius 1. A ray along +x at
+        # (y=0, z=5) hits the side at x=-1, t=9 from x=-10.
+        t = geometry.ray_vs_cylinder_segment(
+            (-10.0, 0.0, 5.0), (1.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0), (0.0, 0.0, 10.0), 1.0)
+        self.assertAlmostEqual(t, 9.0)
+
+    def test_ray_vs_cylinder_miss(self):
+        # Same cylinder, ray offset 2 in y: outside the radius.
+        t = geometry.ray_vs_cylinder_segment(
+            (-10.0, 2.0, 5.0), (1.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0), (0.0, 0.0, 10.0), 1.0)
+        self.assertIsNone(t)
+
+    def test_ray_vs_cylinder_past_the_end(self):
+        # Ray at z=15, above the top cap: the infinite cylinder
+        # would hit, the segment must not.
+        t = geometry.ray_vs_cylinder_segment(
+            (-10.0, 0.0, 15.0), (1.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0), (0.0, 0.0, 10.0), 1.0)
+        self.assertIsNone(t)
+
+    def test_ray_vs_cylinder_cap_hit(self):
+        # Ray down the axis from above hits the top cap at z=10.
+        t = geometry.ray_vs_cylinder_segment(
+            (0.0, 0.0, 20.0), (0.0, 0.0, -1.0),
+            (0.0, 0.0, 0.0), (0.0, 0.0, 10.0), 1.0)
+        self.assertAlmostEqual(t, 10.0)
+
+    def test_ray_vs_cylinder_inside(self):
+        # A ray starting inside the cylinder exits the far side.
+        t = geometry.ray_vs_cylinder_segment(
+            (0.0, 0.0, 5.0), (1.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0), (0.0, 0.0, 10.0), 1.0)
+        self.assertAlmostEqual(t, 1.0)
+
+    def test_ray_vs_ring_hit(self):
+        # Ring radius 5 in the XY plane (axis Z), thickness 0.5.
+        # A ray down at (5, 0) lands on the circle.
+        t = geometry.ray_vs_ring((5.0, 0.0, -10.0), (0.0, 0.0, 1.0),
+                                 (0.0, 0.0, 0.0), (0.0, 0.0, 1.0),
+                                 5.0, 0.5)
+        self.assertAlmostEqual(t, 10.0)
+
+    def test_ray_vs_ring_inside_hole_miss(self):
+        t = geometry.ray_vs_ring((0.0, 0.0, -10.0), (0.0, 0.0, 1.0),
+                                 (0.0, 0.0, 0.0), (0.0, 0.0, 1.0),
+                                 5.0, 0.5)
+        self.assertIsNone(t)
+
+    def test_ray_vs_ring_outside_miss(self):
+        t = geometry.ray_vs_ring((7.0, 0.0, -10.0), (0.0, 0.0, 1.0),
+                                 (0.0, 0.0, 0.0), (0.0, 0.0, 1.0),
+                                 5.0, 0.5)
+        self.assertIsNone(t)
+
+    def test_ray_vs_ring_edge_of_band(self):
+        # 5.4 is inside the 0.5 band, 5.6 is outside.
+        self.assertIsNotNone(geometry.ray_vs_ring(
+            (5.4, 0.0, -10.0), (0.0, 0.0, 1.0),
+            (0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 5.0, 0.5))
+        self.assertIsNone(geometry.ray_vs_ring(
+            (5.6, 0.0, -10.0), (0.0, 0.0, 1.0),
+            (0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 5.0, 0.5))
+
+    def test_ray_vs_ring_parallel(self):
+        # A ray running parallel to the ring plane never meets it.
+        t = geometry.ray_vs_ring((5.0, 0.0, 1.0), (1.0, 0.0, 0.0),
+                                 (0.0, 0.0, 0.0), (0.0, 0.0, 1.0),
+                                 5.0, 0.5)
+        self.assertIsNone(t)
+
+    def test_scale_cube_aabb(self):
+        # The scale pick reuses the existing ray_hits_aabb on the
+        # cube's box: a ray through the cube hits, a ray past it
+        # misses.
+        t = geometry.ray_hits_aabb((0.0, 0.0, -10.0), (0.0, 0.0, 1.0),
+                                   (-1.0, -1.0, -1.0), (1.0, 1.0, 1.0))
+        self.assertAlmostEqual(t, 9.0)
+        self.assertIsNone(geometry.ray_hits_aabb(
+            (5.0, 0.0, -10.0), (0.0, 0.0, 1.0),
+            (-1.0, -1.0, -1.0), (1.0, 1.0, 1.0)))
+
+    def test_pick_constants_match_drawn_move(self):
+        # The pick cylinder runs centre -> GIZMO_MOVE_TIP; the drawn
+        # arrow's farthest vertex must be exactly there, and the cone
+        # base radius must fit inside the pick tolerance (else the
+        # cone would stick out of its own pick cylinder).
+        from light_engine.viewport import (
+            GIZMO_CONE_BASE_RADIUS, GIZMO_MOVE_TIP, GIZMO_PICK_TOLERANCE)
+        verts = self._verts("move")
+        xs = [v[0] for v in verts if v[3:] == (0.85, 0.25, 0.25)]
+        self.assertAlmostEqual(max(xs), GIZMO_MOVE_TIP)
+        self.assertLess(GIZMO_CONE_BASE_RADIUS, GIZMO_PICK_TOLERANCE)
+
+    def test_pick_constants_match_drawn_rotate(self):
+        from light_engine.viewport import GIZMO_RING_RADIUS
+        verts = self._verts("rotate")
+        ring_x = [v for v in verts if v[3:] == (0.85, 0.25, 0.25)]
+        for v in ring_x:
+            self.assertAlmostEqual(math.hypot(v[1], v[2]),
+                                   GIZMO_RING_RADIUS)
+
+    def test_pick_constants_match_drawn_scale(self):
+        from light_engine.viewport import (
+            GIZMO_SCALE_CUBE_CENTER, GIZMO_SCALE_CUBE_HALF)
+        verts = self._verts("scale")
+        cube_x = verts[2:26]
+        xs = [v[0] for v in cube_x]
+        self.assertAlmostEqual(
+            min(xs), GIZMO_SCALE_CUBE_CENTER - GIZMO_SCALE_CUBE_HALF)
+        self.assertAlmostEqual(
+            max(xs), GIZMO_SCALE_CUBE_CENTER + GIZMO_SCALE_CUBE_HALF)
+
+    def test_highlight_brightens_one_axis(self):
+        from light_engine.viewport import GIZMO_AXIS_COLORS, _gizmo_bright
+        verts = self._verts("move", highlight="x")
+        bright = _gizmo_bright(GIZMO_AXIS_COLORS["x"])
+        self.assertTrue(any(v[3:] == bright for v in verts))
+        # Y and Z keep their plain colors; X has no plain verts left.
+        colors = {(v[3], v[4], v[5]) for v in verts}
+        self.assertEqual(colors, {bright, GIZMO_AXIS_COLORS["y"],
+                                  GIZMO_AXIS_COLORS["z"]})
+
+    def test_bright_is_brighter(self):
+        from light_engine.viewport import GIZMO_AXIS_COLORS, _gizmo_bright
+        for color in GIZMO_AXIS_COLORS.values():
+            bright = _gizmo_bright(color)
+            self.assertTrue(all(b >= c for b, c in zip(bright, color)))
+            self.assertTrue(any(b > c for b, c in zip(bright, color)))
+
+    def test_bad_highlight_raises(self):
+        from light_engine.viewport import gizmo_lines
+        with self.assertRaises(ValueError):
+            gizmo_lines("move", "w")
+
+
+@unittest.skipUnless(QT_TESTS, "Qt tests need LIGHT_ENGINE_QT_TESTS=1")
+class QtGizmoDragTests(unittest.TestCase):
+    """T13: handle picking, hover highlight, and dragging — driven
+    through real mouse events on the tavern mug. Pixels come from
+    projecting known world points (the projection helper inverts
+    nothing: it runs the viewport's own matrices forward), so a
+    press lands on the handle it is meant to land on. Drags in the
+    default tavern view assert the right axis, the right direction,
+    and the other components exactly unchanged; the exact-value
+    tests use a camera with the axis in the drag plane, where the
+    drag math recovers the offset exactly."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6 import QtWidgets
+        cls._app = QtWidgets.QApplication.instance()
+        if cls._app is None:
+            cls._app = QtWidgets.QApplication([])
+        from light_engine.window import MainWindow
+        cls.MainWindow = MainWindow
+
+    def _open_tavern(self):
+        scene = scene_mod.load_scene(str(EXAMPLE))
+        window = self.MainWindow(scene=scene)
+        window.resize(800, 600)
+        window.show()
+        self._pump()
+        return window
+
+    def _pump(self, rounds=20):
+        from PySide6 import QtCore, QtWidgets
+        for _ in range(rounds):
+            QtWidgets.QApplication.processEvents()
+            QtCore.QThread.msleep(50)
+
+    def _reload(self, window):
+        """Fresh tavern scene in the same window (resets the mug's
+        base transform AND its keys between drag cases)."""
+        window.scene = scene_mod.load_scene(str(EXAMPLE))
+        window._apply_scene_to_ui()
+        window._select("mug")
+        self._pump(5)
+
+    def _grab_png(self, window):
+        from PySide6 import QtCore
+        image = window._viewport.grabFramebuffer()
+        buf = QtCore.QBuffer()
+        buf.open(QtCore.QBuffer.ReadWrite)
+        image.save(buf, "PNG")
+        return bytes(buf.data())
+
+    def _screen_point(self, vp, world):
+        """Viewport pixel for a world point (forward projection
+        through the viewport's own matrices)."""
+        from PySide6 import QtCore, QtGui
+        proj, view = vp._matrices()
+        mapped = (proj * view).map(QtGui.QVector3D(*world))
+        x = (mapped.x() + 1.0) / 2.0 * vp.width()
+        y = (1.0 - mapped.y()) / 2.0 * vp.height()
+        return QtCore.QPoint(int(round(x)), int(round(y)))
+
+    def _mug(self, window):
+        return scene_mod.find_object(window.scene, "mug")
+
+    def _handle_point(self, vp, mode, axis):
+        """A world point on the given handle: the move shaft midpoint,
+        the rotate ring at 45 degrees (midway between the points
+        where the rings cross, so the ray cannot hit a second ring),
+        or the scale cube centre."""
+        from light_engine.viewport import (
+            GIZMO_SCALE_CUBE_CENTER, _gizmo_axis_frame, gizmo_size)
+        center = vp._gizmo_center()
+        size = gizmo_size(vp.distance)
+        u, p, q = _gizmo_axis_frame(axis)
+        if mode == "rotate":
+            return tuple(center[i] + size * (p[i] + q[i]) / math.sqrt(2.0)
+                         for i in range(3))
+        at = 0.5 if mode == "move" else GIZMO_SCALE_CUBE_CENTER
+        return tuple(center[i] + at * size * u[i] for i in range(3))
+
+    def _ring_point(self, vp, axis, degrees):
+        """A world point on the rotate ring at the given angle in the
+        ring's (p, q) frame."""
+        from light_engine.viewport import _gizmo_axis_frame, gizmo_size
+        center = vp._gizmo_center()
+        size = gizmo_size(vp.distance)
+        _u, p, q = _gizmo_axis_frame(axis)
+        a = math.radians(degrees)
+        return tuple(center[i] + size * (math.cos(a) * p[i]
+                                         + math.sin(a) * q[i])
+                     for i in range(3))
+
+    def _drag(self, vp, start_px, end_px, shift=False):
+        """Press, move, release through QTest. The small delay after
+        each event lets the event loop deliver it before the next
+        one is posted. With shift, the move goes out as a hand-built
+        QMouseEvent carrying ShiftModifier: QTest.keyPress(Key_Shift)
+        does not reach QTest's mouse events (they read the real
+        keyboard, which holds nothing in Xvfb), so a simulated key
+        press would silently test the unsnapped path."""
+        from PySide6 import QtCore, QtGui
+        from PySide6.QtTest import QTest
+        QTest.mousePress(vp, QtCore.Qt.LeftButton,
+                         QtCore.Qt.NoModifier, start_px, 30)
+        if shift:
+            event = QtGui.QMouseEvent(
+                QtCore.QEvent.MouseMove, QtCore.QPointF(end_px),
+                QtCore.Qt.NoButton, QtCore.Qt.LeftButton,
+                QtCore.Qt.ShiftModifier)
+            QtCore.QCoreApplication.sendEvent(vp, event)
+        else:
+            QTest.mouseMove(vp, end_px, 30)
+        QTest.mouseRelease(vp, QtCore.Qt.LeftButton,
+                           QtCore.Qt.NoModifier, end_px, 30)
+        self._pump(5)
+
+    def _press(self, vp, px):
+        """Press the left button and return the drag state (or None
+        when the press did not start a drag). The exact-value tests
+        build their move target from the ACTUAL grab point in the
+        state: the press pixel is rounded to an integer, so the ray
+        meets the drag plane up to a pixel off the ideal handle
+        point — building the target from the ideal point leaves a
+        ~1.5 cm error, building it from the actual grab point leaves
+        only the target pixel's rounding."""
+        from PySide6 import QtCore
+        from PySide6.QtTest import QTest
+        QTest.mousePress(vp, QtCore.Qt.LeftButton,
+                         QtCore.Qt.NoModifier, px, 30)
+        self._pump(5)
+        return vp._gizmo_drag
+
+    def _move_release(self, vp, px, shift=False):
+        """Move to px, then release. With shift the move carries
+        ShiftModifier (see _drag for why it is hand-built)."""
+        from PySide6 import QtCore, QtGui
+        from PySide6.QtTest import QTest
+        if shift:
+            event = QtGui.QMouseEvent(
+                QtCore.QEvent.MouseMove, QtCore.QPointF(px),
+                QtCore.Qt.NoButton, QtCore.Qt.LeftButton,
+                QtCore.Qt.ShiftModifier)
+            QtCore.QCoreApplication.sendEvent(vp, event)
+        else:
+            QTest.mouseMove(vp, px, 30)
+        QTest.mouseRelease(vp, QtCore.Qt.LeftButton,
+                           QtCore.Qt.NoModifier, px, 30)
+        self._pump(5)
+
+    def _face_camera(self, vp, axis):
+        """Put the camera on a side perpendicular to the axis, so the
+        axis lies in the drag plane and the drag math recovers the
+        offset exactly. The eye sits along the frame's p vector with
+        a slight q tilt — both are perpendicular to the axis, so the
+        view direction is exactly perpendicular to it, and the tilt
+        keeps the view off the world up vector (lookAt is degenerate
+        there). (A camera ON the axis is the worst case, not the
+        best: the axis then points at the camera and the drag plane
+        reads almost no movement along it.)"""
+        from light_engine.viewport import _gizmo_axis_frame
+        center = vp._gizmo_center()
+        _u, p, q = _gizmo_axis_frame(axis)
+        d = vp.distance
+        eye = tuple(center[i] + d * (p[i] + 0.15 * q[i])
+                    for i in range(3))
+        vp.set_camera_position(eye, center)
+        self._pump(5)
+
+    # -- picking -------------------------------------------------------
+
+    def test_pick_gizmo_move_handles(self):
+        window = self._open_tavern()
+        vp = window._viewport
+        window._select("mug")
+        self._pump(10)
+        for axis in ("x", "y", "z"):
+            px = self._screen_point(
+                vp, self._handle_point(vp, "move", axis))
+            self.assertEqual(vp.pick_gizmo(px.x(), px.y()), (axis, "move"))
+        window.close()
+
+    def test_pick_gizmo_rotate_handles(self):
+        window = self._open_tavern()
+        vp = window._viewport
+        window._select("mug")
+        window._set_gizmo_mode("rotate")
+        self._pump(10)
+        for axis in ("x", "y", "z"):
+            px = self._screen_point(
+                vp, self._handle_point(vp, "rotate", axis))
+            self.assertEqual(vp.pick_gizmo(px.x(), px.y()),
+                             (axis, "rotate"))
+        window.close()
+
+    def test_pick_gizmo_scale_handles(self):
+        window = self._open_tavern()
+        vp = window._viewport
+        window._select("mug")
+        window._set_gizmo_mode("scale")
+        self._pump(10)
+        for axis in ("x", "y", "z"):
+            px = self._screen_point(
+                vp, self._handle_point(vp, "scale", axis))
+            self.assertEqual(vp.pick_gizmo(px.x(), px.y()),
+                             (axis, "scale"))
+        window.close()
+
+    def test_pick_gizmo_misses_empty_space(self):
+        window = self._open_tavern()
+        vp = window._viewport
+        window._select("mug")
+        self._pump(10)
+        # The top-left corner is empty sky: no handle, no object.
+        self.assertIsNone(vp.pick(5, 5))
+        self.assertIsNone(vp.pick_gizmo(5, 5))
+        window.close()
+
+    def test_pick_gizmo_none_without_selection(self):
+        window = self._open_tavern()
+        vp = window._viewport
+        self._pump(10)
+        self.assertIsNone(vp.pick_gizmo(vp.width() // 2,
+                                        vp.height() // 2))
+        window.close()
+
+    def test_pick_gizmo_none_when_suppressed(self):
+        window = self._open_tavern()
+        vp = window._viewport
+        window._select("mug")
+        self._pump(10)
+        px = self._screen_point(vp, self._handle_point(vp, "move", "x"))
+        self.assertIsNotNone(vp.pick_gizmo(px.x(), px.y()))
+        vp.set_gizmo_suppressed(True)
+        self.assertIsNone(vp.pick_gizmo(px.x(), px.y()))
+        vp.set_gizmo_suppressed(False)
+        window.close()
+
+    # -- hover ---------------------------------------------------------
+
+    def test_hover_highlights_handle(self):
+        from PySide6.QtTest import QTest
+        window = self._open_tavern()
+        vp = window._viewport
+        window._select("mug")
+        self._pump(10)
+        plain = self._grab_png(window)
+        px = self._screen_point(vp, self._handle_point(vp, "move", "x"))
+        QTest.mouseMove(vp, px, 30)
+        self._pump(10)
+        self.assertEqual(vp._gizmo_hover, "x")
+        bright = self._grab_png(window)
+        self.assertNotEqual(plain, bright)
+        window.close()
+
+    def test_hover_clears_when_leaving(self):
+        from PySide6.QtTest import QTest
+        window = self._open_tavern()
+        vp = window._viewport
+        window._select("mug")
+        self._pump(10)
+        px = self._screen_point(vp, self._handle_point(vp, "move", "x"))
+        QTest.mouseMove(vp, px, 30)
+        self._pump(5)
+        self.assertEqual(vp._gizmo_hover, "x")
+        from PySide6 import QtCore
+        QTest.mouseMove(vp, QtCore.QPoint(5, 5), 30)
+        self._pump(5)
+        self.assertIsNone(vp._gizmo_hover)
+        window.close()
+
+    # -- the nine drag cases -------------------------------------------
+    # In the default view the recovered offset is the target offset
+    # times (1 - (axis . view_dir)^2), between 0.5x and 0.8x for the
+    # three axes — so the range 0.2x..1.2x is generous, and the other
+    # two components must be exactly unchanged (a drag writes one
+    # component only).
+
+    def _drag_move_case(self, window, axis):
+        from light_engine.viewport import _gizmo_axis_frame
+        vp = window._viewport
+        self._reload(window)
+        mug = self._mug(window)
+        start = list(mug["position"])
+        idx = ("x", "y", "z").index(axis)
+        u = _gizmo_axis_frame(axis)[0]
+        grab_world = self._handle_point(vp, "move", axis)
+        px0 = self._screen_point(vp, grab_world)
+        self.assertEqual(vp.pick_gizmo(px0.x(), px0.y()), (axis, "move"))
+        target = tuple(grab_world[i] + 50.0 * u[i] for i in range(3))
+        self._drag(vp, px0, self._screen_point(vp, target))
+        delta = mug["position"][idx] - start[idx]
+        self.assertGreater(delta, 10.0)
+        self.assertLess(delta, 60.0)
+        for j in range(3):
+            if j != idx:
+                self.assertEqual(mug["position"][j], start[j])
+        return mug
+
+    def test_drag_move_x(self):
+        window = self._open_tavern()
+        self._drag_move_case(window, "x")
+        window.close()
+
+    def test_drag_move_y(self):
+        window = self._open_tavern()
+        self._drag_move_case(window, "y")
+        window.close()
+
+    def test_drag_move_z(self):
+        window = self._open_tavern()
+        self._drag_move_case(window, "z")
+        window.close()
+
+    def _drag_rotate_case(self, window, axis):
+        vp = window._viewport
+        self._reload(window)
+        window._set_gizmo_mode("rotate")
+        self._pump(5)
+        mug = self._mug(window)
+        idx = ("x", "y", "z").index(axis)
+        start = list(mug["rotation"])
+        px0 = self._screen_point(vp, self._ring_point(vp, axis, 45.0))
+        self.assertEqual(vp.pick_gizmo(px0.x(), px0.y()),
+                         (axis, "rotate"))
+        px1 = self._screen_point(vp, self._ring_point(vp, axis, 135.0))
+        self._drag(vp, px0, px1)
+        delta = mug["rotation"][idx] - start[idx]
+        self.assertAlmostEqual(delta, 90.0, delta=3.0)
+        for j in range(3):
+            if j != idx:
+                self.assertEqual(mug["rotation"][j], start[j])
+        return mug
+
+    def test_drag_rotate_x(self):
+        window = self._open_tavern()
+        self._drag_rotate_case(window, "x")
+        window.close()
+
+    def test_drag_rotate_y(self):
+        window = self._open_tavern()
+        self._drag_rotate_case(window, "y")
+        window.close()
+
+    def test_drag_rotate_z(self):
+        window = self._open_tavern()
+        self._drag_rotate_case(window, "z")
+        window.close()
+
+    def _drag_scale_case(self, window, axis):
+        from light_engine.viewport import (
+            GIZMO_SCALE_CUBE_CENTER, _gizmo_axis_frame, gizmo_size)
+        vp = window._viewport
+        self._reload(window)
+        window._set_gizmo_mode("scale")
+        self._pump(5)
+        mug = self._mug(window)
+        idx = ("x", "y", "z").index(axis)
+        u = _gizmo_axis_frame(axis)[0]
+        center = vp._gizmo_center()
+        size = gizmo_size(vp.distance)
+        grab_world = self._handle_point(vp, "scale", axis)
+        px0 = self._screen_point(vp, grab_world)
+        self.assertEqual(vp.pick_gizmo(px0.x(), px0.y()),
+                         (axis, "scale"))
+        # Twice the grab distance along the axis: the recovered ratio
+        # is 2 - (axis . view_dir)^2, between 1.5x and 1.8x.
+        target = tuple(center[i] + 2.0 * GIZMO_SCALE_CUBE_CENTER
+                       * size * u[i] for i in range(3))
+        self._drag(vp, px0, self._screen_point(vp, target))
+        ratio = mug["scale"][idx]
+        self.assertGreater(ratio, 1.3)
+        self.assertLess(ratio, 2.1)
+        for j in range(3):
+            if j != idx:
+                self.assertEqual(mug["scale"][j], 1.0)
+        return mug
+
+    def test_drag_scale_x(self):
+        window = self._open_tavern()
+        self._drag_scale_case(window, "x")
+        window.close()
+
+    def test_drag_scale_y(self):
+        window = self._open_tavern()
+        self._drag_scale_case(window, "y")
+        window.close()
+
+    def test_drag_scale_z(self):
+        window = self._open_tavern()
+        self._drag_scale_case(window, "z")
+        window.close()
+
+    # -- exact drag math (axis in the drag plane) ----------------------
+
+    def test_drag_move_x_exact(self):
+        from light_engine.viewport import _gizmo_axis_frame
+        window = self._open_tavern()
+        vp = window._viewport
+        window._select("mug")
+        self._pump(10)
+        self._face_camera(vp, "x")
+        mug = self._mug(window)
+        start = mug["position"][0]
+        grab_world = self._handle_point(vp, "move", "x")
+        px0 = self._screen_point(vp, grab_world)
+        self.assertEqual(vp.pick_gizmo(px0.x(), px0.y()), ("x", "move"))
+        state = self._press(vp, px0)
+        self.assertIsNotNone(state)
+        u = _gizmo_axis_frame("x")[0]
+        grab = state["grab_point"]
+        target = tuple(grab[i] + 50.0 * u[i] for i in range(3))
+        self._move_release(vp, self._screen_point(vp, target))
+        self.assertAlmostEqual(mug["position"][0] - start, 50.0, delta=1.0)
+        window.close()
+
+    def test_drag_scale_x_exact(self):
+        from light_engine.viewport import _gizmo_axis_frame
+        window = self._open_tavern()
+        vp = window._viewport
+        window._select("mug")
+        window._set_gizmo_mode("scale")
+        self._pump(10)
+        self._face_camera(vp, "x")
+        mug = self._mug(window)
+        grab_world = self._handle_point(vp, "scale", "x")
+        px0 = self._screen_point(vp, grab_world)
+        self.assertEqual(vp.pick_gizmo(px0.x(), px0.y()), ("x", "scale"))
+        state = self._press(vp, px0)
+        self.assertIsNotNone(state)
+        # Twice the ACTUAL grab distance (from the drag state, not the
+        # ideal cube centre): the ratio is exactly 2 up to the target
+        # pixel's rounding.
+        center = state["center"]
+        u = _gizmo_axis_frame("x")[0]
+        target = tuple(center[i] + 2.0 * state["grab_distance"] * u[i]
+                       for i in range(3))
+        self._move_release(vp, self._screen_point(vp, target))
+        self.assertAlmostEqual(mug["scale"][0], 2.0, delta=0.05)
+        window.close()
+
+    # -- Shift snap -----------------------------------------------------
+
+    def test_snap_move(self):
+        from light_engine.viewport import _gizmo_axis_frame
+        window = self._open_tavern()
+        vp = window._viewport
+        window._select("mug")
+        self._pump(10)
+        self._face_camera(vp, "x")
+        mug = self._mug(window)
+        start = mug["position"][0]
+        grab_world = self._handle_point(vp, "move", "x")
+        px0 = self._screen_point(vp, grab_world)
+        state = self._press(vp, px0)
+        self.assertIsNotNone(state)
+        u = _gizmo_axis_frame("x")[0]
+        grab = state["grab_point"]
+        # 48 cm with Shift held snaps to 50 (the 45 boundary is 3 cm
+        # away, far outside pixel-rounding error).
+        target = tuple(grab[i] + 48.0 * u[i] for i in range(3))
+        self._move_release(vp, self._screen_point(vp, target), shift=True)
+        self.assertAlmostEqual(mug["position"][0] - start, 50.0, delta=0.5)
+        window.close()
+
+    def test_snap_rotate(self):
+        window = self._open_tavern()
+        vp = window._viewport
+        window._select("mug")
+        window._set_gizmo_mode("rotate")
+        self._pump(10)
+        mug = self._mug(window)
+        px0 = self._screen_point(vp, self._ring_point(vp, "z", 45.0))
+        px1 = self._screen_point(vp, self._ring_point(vp, "z", 125.0))
+        # 80 degrees with Shift held snaps to 75.
+        self._drag(vp, px0, px1, shift=True)
+        self.assertAlmostEqual(mug["rotation"][2], 75.0, delta=2.0)
+        window.close()
+
+    def test_snap_scale(self):
+        from light_engine.viewport import _gizmo_axis_frame
+        window = self._open_tavern()
+        vp = window._viewport
+        window._select("mug")
+        window._set_gizmo_mode("scale")
+        self._pump(10)
+        self._face_camera(vp, "x")
+        mug = self._mug(window)
+        grab_world = self._handle_point(vp, "scale", "x")
+        px0 = self._screen_point(vp, grab_world)
+        state = self._press(vp, px0)
+        self.assertIsNotNone(state)
+        center = state["center"]
+        u = _gizmo_axis_frame("x")[0]
+        # 1.79x the ACTUAL grab distance with Shift held snaps to 1.8
+        # (the 1.75 boundary is 0.04 away, far outside the target
+        # pixel's rounding error).
+        target = tuple(center[i] + 1.79 * state["grab_distance"] * u[i]
+                       for i in range(3))
+        self._move_release(vp, self._screen_point(vp, target), shift=True)
+        self.assertAlmostEqual(mug["scale"][0], 1.8, delta=0.02)
+        window.close()
+
+    # -- live inspector, priority, orbit, keys ------------------------
+
+    def test_inspector_updates_live_during_drag(self):
+        from PySide6 import QtCore
+        from PySide6.QtTest import QTest
+        from light_engine.viewport import _gizmo_axis_frame
+        window = self._open_tavern()
+        vp = window._viewport
+        window._select("mug")
+        self._pump(10)
+        mug = self._mug(window)
+        grab_world = self._handle_point(vp, "move", "x")
+        px0 = self._screen_point(vp, grab_world)
+        u = _gizmo_axis_frame("x")[0]
+        target = tuple(grab_world[i] + 50.0 * u[i] for i in range(3))
+        px1 = self._screen_point(vp, target)
+        QTest.mousePress(vp, QtCore.Qt.LeftButton,
+                         QtCore.Qt.NoModifier, px0, 30)
+        QTest.mouseMove(vp, px1, 30)
+        self._pump(5)
+        # Mid-drag, before the release: the spin box already shows
+        # the new value (1 decimal, like the inspector always shows).
+        self.assertAlmostEqual(
+            window._spins[("position", "x")].value(),
+            round(mug["position"][0], 1), delta=0.05)
+        self.assertNotEqual(mug["position"][0], -60.0)
+        QTest.mouseRelease(vp, QtCore.Qt.LeftButton,
+                           QtCore.Qt.NoModifier, px1, 30)
+        self._pump(5)
+        window.close()
+
+    def test_handle_wins_over_orbit(self):
+        from light_engine.viewport import _gizmo_axis_frame
+        window = self._open_tavern()
+        vp = window._viewport
+        window._select("mug")
+        self._pump(10)
+        mug = self._mug(window)
+        azimuth = vp.azimuth
+        grab_world = self._handle_point(vp, "move", "x")
+        px0 = self._screen_point(vp, grab_world)
+        u = _gizmo_axis_frame("x")[0]
+        target = tuple(grab_world[i] + 50.0 * u[i] for i in range(3))
+        self._drag(vp, px0, self._screen_point(vp, target))
+        self.assertEqual(vp.azimuth, azimuth)
+        self.assertNotEqual(mug["position"][0], -60.0)
+        window.close()
+
+    def test_orbit_still_works_on_empty_space(self):
+        from PySide6 import QtCore
+        from PySide6.QtTest import QTest
+        window = self._open_tavern()
+        vp = window._viewport
+        window._select("mug")
+        self._pump(10)
+        self.assertIsNone(vp.pick(5, 5))
+        azimuth = vp.azimuth
+        QTest.mousePress(vp, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+                         QtCore.QPoint(5, 5), 30)
+        QTest.mouseMove(vp, QtCore.QPoint(105, 5), 30)
+        QTest.mouseRelease(vp, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+                           QtCore.QPoint(105, 5), 30)
+        self._pump(5)
+        self.assertNotEqual(vp.azimuth, azimuth)
+        window.close()
+
+    def test_press_release_on_handle_keeps_selection(self):
+        from PySide6 import QtCore
+        from PySide6.QtTest import QTest
+        window = self._open_tavern()
+        vp = window._viewport
+        window._select("mug")
+        self._pump(10)
+        mug = self._mug(window)
+        px = self._screen_point(vp, self._handle_point(vp, "move", "x"))
+        QTest.mousePress(vp, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+                         px, 30)
+        QTest.mouseRelease(vp, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+                           px, 30)
+        self._pump(5)
+        self.assertEqual(window.selected_id, "mug")
+        self.assertEqual(mug["position"], [-60.0, -20.0, 91.0])
+        self.assertIsNone(vp._gizmo_drag)
+        window.close()
+
+    def test_drag_moves_exact_frame_key(self):
+        # The mug has a position key at frame 0. A drag at frame 0
+        # moves the key with the base, so the object visibly follows
+        # the pointer (keys override the base at their frames) — and
+        # the gizmo centre moves with it.
+        from light_engine.viewport import _gizmo_axis_frame
+        window = self._open_tavern()
+        vp = window._viewport
+        window._select("mug")
+        self._pump(10)
+        mug = self._mug(window)
+        grab_world = self._handle_point(vp, "move", "x")
+        px0 = self._screen_point(vp, grab_world)
+        u = _gizmo_axis_frame("x")[0]
+        target = tuple(grab_world[i] + 50.0 * u[i] for i in range(3))
+        self._drag(vp, px0, self._screen_point(vp, target))
+        keys = anim_mod.get_keys(window.scene, "mug", "position")
+        key0 = next(v for f, v in keys if f == 0)
+        self.assertEqual(key0, mug["position"])
+        center = vp._gizmo_center()
+        self.assertAlmostEqual(center[0], mug["position"][0], delta=0.01)
+        window.close()
+
+
 if __name__ == "__main__":
     unittest.main()

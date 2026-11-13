@@ -221,6 +221,12 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setContentsMargins(6, 6, 6, 6)
         self._viewport = Viewport()
         self._viewport.object_selected.connect(self._on_viewport_selected)
+        # Live inspector during a gizmo drag (T13): the viewport fires
+        # transform_changed on every drag step, and the inspector
+        # re-reads the object. _refresh_inspector sets _refreshing
+        # while it writes the spin boxes, so the values cannot feed
+        # back into _on_transform_edited.
+        self._viewport.transform_changed.connect(self._refresh_inspector)
         # Gizmo toolbar (T12): mode buttons above the viewport + W/E/R
         # shortcuts (Blender convention). The shortcuts live on the
         # centre pane with WidgetWithChildrenShortcut, so they fire

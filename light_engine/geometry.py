@@ -417,3 +417,91 @@ def ray_hits_aabb(origin, direction, mn, mx):
             if tmin > tmax:
                 return None
     return tmin
+
+
+# ------------------------------------------------------------ gizmo picking
+# Ray tests for the gizmo handles (T13). All take an origin and a
+# direction and return the ray parameter of the nearest hit in front
+# of the origin, or None. The direction need not be unit — t is then
+# in direction units, not cm — but the viewport passes a unit ray,
+# so t is a distance in cm there.
+
+def ray_vs_plane(origin, direction, point, normal):
+    """Distance along the ray to the plane through `point` with unit
+    `normal`, or None when the ray runs parallel to the plane or the
+    plane is behind the ray origin. The drag math uses this for both
+    the move/scale plane (perpendicular to the camera) and the rotate
+    plane (the ring's own plane)."""
+    denom = sum(direction[i] * normal[i] for i in range(3))
+    if abs(denom) < 1e-12:
+        return None
+    t = sum((point[i] - origin[i]) * normal[i] for i in range(3)) / denom
+    if t < 0.0:
+        return None
+    return t
+
+
+def ray_vs_cylinder_segment(origin, direction, a, b, radius):
+    """Distance along the ray to a finite cylinder (side + end caps)
+    running from `a` to `b` with `radius`, or None. The gizmo's move
+    handles read as one cylinder per axis, from the gizmo centre to
+    the arrow tip: the shaft (0 to 0.75) and the cone (0.75 to 1.0,
+    base radius 0.09) both fit inside a radius-0.12 cylinder, so one
+    test covers the whole arrow."""
+    axis = [b[i] - a[i] for i in range(3)]
+    length = math.sqrt(sum(v * v for v in axis))
+    if length < 1e-12 or radius <= 0.0:
+        return None
+    axis = [v / length for v in axis]
+    delta = [origin[i] - a[i] for i in range(3)]
+    d_dot = sum(direction[i] * axis[i] for i in range(3))
+    delta_dot = sum(delta[i] * axis[i] for i in range(3))
+    d_perp = [direction[i] - d_dot * axis[i] for i in range(3)]
+    delta_perp = [delta[i] - delta_dot * axis[i] for i in range(3)]
+    best = None
+    # Side: |delta_perp + t * d_perp|^2 = radius^2.
+    aa = sum(v * v for v in d_perp)
+    if aa > 1e-18:
+        bb = 2.0 * sum(delta_perp[i] * d_perp[i] for i in range(3))
+        cc = sum(v * v for v in delta_perp) - radius * radius
+        disc = bb * bb - 4.0 * aa * cc
+        if disc >= 0.0:
+            root = math.sqrt(disc)
+            for t in ((-bb - root) / (2.0 * aa), (-bb + root) / (2.0 * aa)):
+                if t < 0.0:
+                    continue
+                s = delta_dot + t * d_dot
+                if -1e-9 <= s <= length + 1e-9:
+                    if best is None or t < best:
+                        best = t
+    # End caps: the two planes at s = 0 and s = length, with the hit
+    # inside the cap disk.
+    if abs(d_dot) > 1e-12:
+        for s_cap in (0.0, length):
+            t = (s_cap - delta_dot) / d_dot
+            if t < 0.0 or (best is not None and t >= best):
+                continue
+            radial = math.sqrt(max(0.0, sum(
+                (delta_perp[i] + t * d_perp[i]) ** 2 for i in range(3))))
+            if radial <= radius:
+                best = t
+    return best
+
+
+def ray_vs_ring(origin, direction, center, axis, radius, thickness):
+    """Distance along the ray to a thin ring (the gizmo's rotate
+    handles, T13), or None. The ray meets the ring's plane — the
+    plane through `center` with unit normal `axis` — and the hit
+    counts when it lands within `thickness` of the circle of
+    `radius` around the centre. A torus test would need the tube
+    radius too; the drawn ring is a zero-width line, so the flat
+    annulus is the honest test for what is on screen."""
+    t = ray_vs_plane(origin, direction, center, axis)
+    if t is None:
+        return None
+    rel = [origin[i] + direction[i] * t - center[i] for i in range(3)]
+    along = sum(rel[i] * axis[i] for i in range(3))
+    radial = math.sqrt(max(0.0, sum(v * v for v in rel) - along * along))
+    if abs(radial - radius) <= thickness:
+        return t
+    return None

@@ -21,7 +21,13 @@ Scale gizmo on the selected object, drawn with the lines program only
 (cones and cubes are wireframe outlines), constant screen size from
 the camera distance, depth test off so it is never hidden inside the
 object. Renders (render_frame_to) suppress it — it is
-interactive-viewport only.
+interactive-viewport only. Gizmo dragging (T13): the handles are
+pickable (ray vs cylinder / ring / AABB, from the same constants
+the draw uses), a press on a handle drags that axis — Move on a
+camera-perpendicular plane, Rotate on the ring plane, Scale by
+distance from the centre — Shift snaps (10 cm / 15 deg / 0.1), the
+hovered handle brightens, and the inspector follows live. Drags
+write the transform directly; undo for a drag is T14.
 
 Units are cm, z-up.
 """
@@ -42,7 +48,8 @@ from . import animation as anim_mod
 from . import meshfile as meshfile_mod
 from . import shaders as shader_mod
 from .geometry import (apply_matrix, compose_matrix, local_bounds,
-                       mat_inverse, ray_hits_aabb, tessellate,
+                       mat_inverse, ray_hits_aabb, ray_vs_cylinder_segment,
+                       ray_vs_plane, ray_vs_ring, tessellate,
                        tessellate_indexed)
 from .scene import default_smooth_shading, hex_to_rgb
 from .textures import build_qimage
@@ -97,6 +104,32 @@ GIZMO_AXIS_COLORS = {"x": (0.85, 0.25, 0.25),
 GIZMO_SIZE_FACTOR = 0.12
 GIZMO_RING_SEGMENTS = 48
 GIZMO_CONE_SEGMENTS = 8
+# Handle extents in unit-gizmo space (T12 values, named in T13 so the
+# drawing and the picking share one source of truth — the builders
+# below and pick_gizmo both read these, so the pick can never drift
+# from what is drawn). Move: shaft to 0.75, cone base radius 0.09 at
+# 0.75, apex at 1.0. Rotate: ring radius 1.0. Scale: line to 0.7,
+# cube centred at 0.81 with half-side 0.11.
+GIZMO_MOVE_SHAFT_END = 0.75
+GIZMO_MOVE_TIP = 1.0
+GIZMO_CONE_BASE_RADIUS = 0.09
+GIZMO_RING_RADIUS = 1.0
+GIZMO_SCALE_LINE_END = 0.7
+GIZMO_SCALE_CUBE_CENTER = 0.81
+GIZMO_SCALE_CUBE_HALF = 0.11
+# Pick tolerance in unit-gizmo space (T13): the drawn lines have no
+# width, so the pick tests fatten each handle by this much — about
+# 11 screen pixels at the tavern view, a grabbable handle without
+# swallowing the scene around it.
+GIZMO_PICK_TOLERANCE = 0.12
+# Shift-snap steps (T13): move 10 cm, rotate 15 degrees, scale 0.1.
+GIZMO_SNAP_MOVE = 10.0
+GIZMO_SNAP_ROTATE = 15.0
+GIZMO_SNAP_SCALE = 0.1
+# A scale drag never takes an axis below this: 0 would collapse the
+# object and a negative would flip it inside out. The inspector still
+# accepts any value typed in — this clamp is drag-only.
+GIZMO_MIN_SCALE = 0.01
 
 
 def gizmo_size(distance):
@@ -118,52 +151,60 @@ def _gizmo_add(verts, a, b, color):
     verts += [a[0], a[1], a[2], *color, b[0], b[1], b[2], *color]
 
 
-def _gizmo_move_axis(verts, axis):
+def _gizmo_bright(color):
+    """The hover highlight for an axis color (T13): each channel moved
+    55% toward white, so the hovered handle reads brighter without
+    changing hue."""
+    return tuple(c + (1.0 - c) * 0.55 for c in color)
+
+
+def _gizmo_move_axis(verts, axis, color):
     """One move arrow: a shaft from the origin to 0.75, then a cone
     outline — an 8-segment base circle of radius 0.09 at 0.75 and
     four side lines to the apex at 1.0."""
     u, p, q = _gizmo_axis_frame(axis)
-    color = GIZMO_AXIS_COLORS[axis]
-    tip = tuple(0.75 * v for v in u)
+    tip = tuple(GIZMO_MOVE_SHAFT_END * v for v in u)
     _gizmo_add(verts, (0.0, 0.0, 0.0), tip, color)
     base = []
     for i in range(GIZMO_CONE_SEGMENTS):
         angle = 2.0 * math.pi * i / GIZMO_CONE_SEGMENTS
-        base.append(tuple(tip[j] + 0.09 * (math.cos(angle) * p[j]
-                                           + math.sin(angle) * q[j])
+        base.append(tuple(tip[j] + GIZMO_CONE_BASE_RADIUS
+                          * (math.cos(angle) * p[j]
+                             + math.sin(angle) * q[j])
                           for j in range(3)))
     for i in range(GIZMO_CONE_SEGMENTS):
         _gizmo_add(verts, base[i], base[(i + 1) % GIZMO_CONE_SEGMENTS],
                    color)
+    apex = tuple(GIZMO_MOVE_TIP * v for v in u)
     for i in range(0, GIZMO_CONE_SEGMENTS, 2):
-        _gizmo_add(verts, base[i], u, color)
+        _gizmo_add(verts, base[i], apex, color)
 
 
-def _gizmo_rotate_axis(verts, axis):
+def _gizmo_rotate_axis(verts, axis, color):
     """One rotate ring: a 48-segment circle of radius 1.0 in the
     plane perpendicular to the axis."""
     _u, p, q = _gizmo_axis_frame(axis)
-    color = GIZMO_AXIS_COLORS[axis]
     ring = []
     for i in range(GIZMO_RING_SEGMENTS):
         angle = 2.0 * math.pi * i / GIZMO_RING_SEGMENTS
-        ring.append(tuple(math.cos(angle) * p[j] + math.sin(angle) * q[j]
+        ring.append(tuple(GIZMO_RING_RADIUS
+                          * (math.cos(angle) * p[j]
+                             + math.sin(angle) * q[j])
                           for j in range(3)))
     for i in range(GIZMO_RING_SEGMENTS):
         _gizmo_add(verts, ring[i], ring[(i + 1) % GIZMO_RING_SEGMENTS],
                    color)
 
 
-def _gizmo_scale_axis(verts, axis):
+def _gizmo_scale_axis(verts, axis, color):
     """One scale handle: a short line from the origin to 0.7, ending
     in a small cube outline (side 0.22) centred at 0.81 along the
     axis."""
     u, p, q = _gizmo_axis_frame(axis)
-    color = GIZMO_AXIS_COLORS[axis]
-    end = tuple(0.7 * v for v in u)
+    end = tuple(GIZMO_SCALE_LINE_END * v for v in u)
     _gizmo_add(verts, (0.0, 0.0, 0.0), end, color)
-    centre = tuple(0.81 * v for v in u)
-    half = 0.11
+    centre = tuple(GIZMO_SCALE_CUBE_CENTER * v for v in u)
+    half = GIZMO_SCALE_CUBE_HALF
     corners = []
     for su in (-1.0, 1.0):
         for sp in (-1.0, 1.0):
@@ -179,11 +220,13 @@ def _gizmo_scale_axis(verts, axis):
         _gizmo_add(verts, corners[a], corners[b], color)
 
 
-def gizmo_lines(mode):
+def gizmo_lines(mode, highlight=None):
     """Interleaved pos(3)+color(3) floats for one gizmo mode, in unit
     space centred on the origin (T12). The draw scales the unit gizmo
     by gizmo_size(distance) and translates it to the selected
-    object's position. Raises ValueError on an unknown mode."""
+    object's position. Raises ValueError on an unknown mode.
+    highlight (T13) is None or one axis ("x", "y", "z"): that axis's
+    lines come out in the bright hover color, the others unchanged."""
     builders = {"move": _gizmo_move_axis,
                 "rotate": _gizmo_rotate_axis,
                 "scale": _gizmo_scale_axis}
@@ -191,9 +234,15 @@ def gizmo_lines(mode):
     if build is None:
         raise ValueError(f"unknown gizmo mode: {mode!r} "
                          f"(expected one of {', '.join(GIZMO_MODES)})")
+    if highlight is not None and highlight not in ("x", "y", "z"):
+        raise ValueError(f"unknown gizmo highlight: {highlight!r} "
+                         "(expected None or one of 'x', 'y', 'z')")
     verts = []
     for axis in ("x", "y", "z"):
-        build(verts, axis)
+        color = GIZMO_AXIS_COLORS[axis]
+        if axis == highlight:
+            color = _gizmo_bright(color)
+        build(verts, axis, color)
     return verts
 
 
@@ -261,6 +310,10 @@ def _line_vao(gl, vertices):
 
 class Viewport(QOpenGLWidget):
     object_selected = QtCore.Signal(str)  # object id, or "" for none
+    # Fired on every gizmo-drag step (T13): the window refreshes the
+    # inspector from the object, so the spin boxes follow the drag
+    # live. No payload — the selected object is the one that moved.
+    transform_changed = QtCore.Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -272,6 +325,11 @@ class Viewport(QOpenGLWidget):
         self.setFormat(fmt)
         self.setMinimumSize(320, 240)
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
+        # Mouse tracking (T13): hover highlighting needs move events
+        # with no button held, which Qt only sends when tracking is
+        # on. (QTest sends the events directly, so tests pass either
+        # way — this is for real use.)
+        self.setMouseTracking(True)
         self._scene = None
         self._base_path = None  # folder the scene was loaded from;
         # mesh_file paths resolve against it (T7). None for a fresh
@@ -311,16 +369,24 @@ class Viewport(QOpenGLWidget):
         self._frame = 0
         self.selected_id = None
         # Gizmo (T12): the transform mode, default Move. One VAO per
-        # mode is built lazily and cached in _gizmo_vaos.
+        # (mode, highlight) pair is built lazily and cached in
+        # _gizmo_vaos (T13 adds the highlight dimension: the hovered
+        # handle draws brighter, so each mode has one plain VAO plus
+        # one per hovered axis).
         # _gizmo_suppressed hides the gizmo while a render is being
         # grabbed (render_frame_to sets it): the gizmo is
         # interactive-viewport only and never appears in an exported
         # frame. The selection box is NOT suppressed — it has always
         # been part of the grabbed viewport, and T12 does not change
         # that.
+        # _gizmo_hover (T13) is the axis under the pointer ("x", "y",
+        # "z") or None; _gizmo_drag is the drag state dict while a
+        # handle is being dragged, else None.
         self.gizmo_mode = "move"
         self._gizmo_vaos = {}
         self._gizmo_suppressed = False
+        self._gizmo_hover = None
+        self._gizmo_drag = None
         # Exposure for the ACES tone mapping (T4). Fixed at 1.0 for
         # now — an exposure control is a later item, not T4.
         self._exposure = 1.0
@@ -431,6 +497,20 @@ class Viewport(QOpenGLWidget):
         the live view as soon as the grab is done."""
         self._gizmo_suppressed = bool(suppressed)
         self.update()
+
+    def _gizmo_center(self):
+        """Sampled world position of the selected object — the point
+        the gizmo is drawn on (T12) and picked and dragged around
+        (T13) — or None with no selection. Sampled, not the base
+        transform, so the gizmo follows the animation."""
+        if not self._scene or not self.selected_id:
+            return None
+        obj = next((o for o in self._scene["objects"]
+                    if o["id"] == self.selected_id), None)
+        if obj is None:
+            return None
+        model = self._model_matrix(obj)
+        return (model[0][3], model[1][3], model[2][3])
 
     def _destroy_entry(self, entry):
         """Destroy one object's VAO + VBO + optional IBO. Caller must
@@ -1152,14 +1232,17 @@ class Viewport(QOpenGLWidget):
         self._sel_vao.release()
         prog.release()
 
-    def _ensure_gizmo_vao(self, mode):
-        """One cached VAO per gizmo mode (T12), built lazily from the
-        unit-space geometry. The draw scales it via the model matrix,
-        so the VAO never needs rebuilding."""
-        entry = self._gizmo_vaos.get(mode)
+    def _ensure_gizmo_vao(self, mode, highlight=None):
+        """One cached VAO per (mode, highlight) pair (T12/T13), built
+        lazily from the unit-space geometry. The draw scales it via
+        the model matrix, so the VAO never needs rebuilding; the
+        highlight only changes the axis colors, so the plain VAO
+        (highlight None) is byte-identical to T12's."""
+        key = (mode, highlight)
+        entry = self._gizmo_vaos.get(key)
         if entry is None:
-            entry = _line_vao(self._gl, gizmo_lines(mode))
-            self._gizmo_vaos[mode] = entry
+            entry = _line_vao(self._gl, gizmo_lines(mode, highlight))
+            self._gizmo_vaos[key] = entry
         return entry
 
     def _draw_gizmo(self, gl, proj, view):
@@ -1171,18 +1254,18 @@ class Viewport(QOpenGLWidget):
         local-orientation gizmo is a later item, not in the T12
         spec. Depth test off for the gizmo only, so it is never
         hidden inside the object; the test is back on before this
-        returns."""
-        obj = next((o for o in self._scene["objects"]
-                    if o["id"] == self.selected_id), None)
-        if obj is None:
+        returns. The hovered handle (T13) draws from the brightened
+        VAO; with no hover the draw is exactly T12's."""
+        center = self._gizmo_center()
+        if center is None:
             return
-        model = self._model_matrix(obj)
-        cx, cy, cz = model[0][3], model[1][3], model[2][3]
+        cx, cy, cz = center
         size = gizmo_size(self.distance)
         qm = QtGui.QMatrix4x4()
         qm.translate(cx, cy, cz)
         qm.scale(size, size, size)
-        vao, _buf, count = self._ensure_gizmo_vao(self.gizmo_mode)
+        vao, _buf, count = self._ensure_gizmo_vao(self.gizmo_mode,
+                                                  self._gizmo_hover)
         prog = self._programs["lines"]
         gl.glDisable(GL_DEPTH_TEST)
         prog.bind()
@@ -1196,10 +1279,11 @@ class Viewport(QOpenGLWidget):
         gl.glEnable(GL_DEPTH_TEST)
 
     # -- picking ---------------------------------------------------------
-    def pick(self, x, y):
-        """Object id under pixel (x, y), or None. Ray vs per-object box."""
-        if not self._scene or not self._scene["objects"]:
-            return None
+    def _pick_ray(self, x, y):
+        """(origin, unit direction) of the ray through pixel (x, y),
+        or None when the projection cannot be inverted. Factored out
+        of pick() in T13 so object picking, gizmo picking, and the
+        drag math all shoot the same ray."""
         proj, view = self._matrices()
         combined = proj * view
         inv, ok = combined.inverted()
@@ -1213,7 +1297,16 @@ class Viewport(QOpenGLWidget):
         direction = (far.x() - near.x(), far.y() - near.y(),
                      far.z() - near.z())
         length = math.sqrt(sum(v * v for v in direction)) or 1.0
-        direction = tuple(v / length for v in direction)
+        return origin, tuple(v / length for v in direction)
+
+    def pick(self, x, y):
+        """Object id under pixel (x, y), or None. Ray vs per-object box."""
+        if not self._scene or not self._scene["objects"]:
+            return None
+        ray = self._pick_ray(x, y)
+        if ray is None:
+            return None
+        origin, direction = ray
         eye = self.camera_position()
         best, best_dist = None, float("inf")
         for obj in self._scene["objects"]:
@@ -1237,18 +1330,226 @@ class Viewport(QOpenGLWidget):
                 best, best_dist = obj["id"], dist
         return best
 
+    def pick_gizmo(self, x, y):
+        """(axis, mode) of the gizmo handle under pixel (x, y), or
+        None. The handle geometry comes from the same constants the
+        draw uses — GIZMO_MOVE_TIP for the arrow cylinder, GIZMO_RING_
+        RADIUS for the rotate ring, GIZMO_SCALE_CUBE_CENTER/HALF for
+        the scale cube — so the pick can never drift from what is
+        drawn; GIZMO_PICK_TOLERANCE fattens the zero-width lines into
+        grabbable handles. The closest hit wins, which is the handle
+        facing the camera when two overlap. Nothing is pickable with
+        no selection, or while the gizmo is suppressed for a render."""
+        if not self._scene or not self.selected_id \
+                or self._gizmo_suppressed:
+            return None
+        center = self._gizmo_center()
+        if center is None:
+            return None
+        ray = self._pick_ray(x, y)
+        if ray is None:
+            return None
+        origin, direction = ray
+        size = gizmo_size(self.distance)
+        tol = GIZMO_PICK_TOLERANCE * size
+        best, best_t = None, float("inf")
+        for axis in ("x", "y", "z"):
+            u = _gizmo_axis_frame(axis)[0]
+            if self.gizmo_mode == "move":
+                # One cylinder per arrow, centre to tip: it covers
+                # the shaft and the cone (base radius 0.09 < 0.12).
+                end = tuple(center[i] + u[i] * GIZMO_MOVE_TIP * size
+                            for i in range(3))
+                t = ray_vs_cylinder_segment(origin, direction, center,
+                                            end, tol)
+            elif self.gizmo_mode == "rotate":
+                t = ray_vs_ring(origin, direction, center, u,
+                                GIZMO_RING_RADIUS * size, tol)
+            else:  # scale: the cube only, fattened by the tolerance.
+                c = tuple(center[i]
+                          + u[i] * GIZMO_SCALE_CUBE_CENTER * size
+                          for i in range(3))
+                half = (GIZMO_SCALE_CUBE_HALF
+                        + GIZMO_PICK_TOLERANCE) * size
+                t = ray_hits_aabb(
+                    origin, direction,
+                    tuple(c[i] - half for i in range(3)),
+                    tuple(c[i] + half for i in range(3)))
+            if t is not None and t < best_t:
+                best, best_t = axis, t
+        if best is None:
+            return None
+        return best, self.gizmo_mode
+
+    # -- gizmo dragging (T13) ------------------------------------------
+    def _start_gizmo_drag(self, axis, x, y):
+        """Arm a drag of `axis` in the current mode from pixel (x, y).
+        Returns False when the drag plane cannot be built (the press
+        ray runs parallel to it) — the caller then falls through to
+        the orbit path. The drag plane is the ring's own plane for
+        Rotate, and the plane through the gizmo centre perpendicular
+        to the camera for Move and Scale. The start transform is the
+        SAMPLED one at the current frame: that is what the user sees
+        and what the gizmo sits on."""
+        ray = self._pick_ray(x, y)
+        center = self._gizmo_center()
+        if ray is None or center is None:
+            return False
+        obj = next((o for o in self._scene["objects"]
+                    if o["id"] == self.selected_id), None)
+        if obj is None:
+            return False
+        origin, direction = ray
+        u = _gizmo_axis_frame(axis)[0]
+        if self.gizmo_mode == "rotate":
+            plane_point, plane_normal = center, u
+        else:
+            plane_point, plane_normal = center, self._view_dir()
+        t = ray_vs_plane(origin, direction, plane_point, plane_normal)
+        if t is None:
+            return False
+        grab = tuple(origin[i] + direction[i] * t for i in range(3))
+        state = {"mode": self.gizmo_mode, "axis": axis,
+                 "object_id": obj["id"],
+                 "start": anim_mod.sample_object(self._scene, obj,
+                                                 self._frame),
+                 "center": center,
+                 "plane_point": plane_point,
+                 "plane_normal": plane_normal,
+                 "grab_point": grab}
+        if self.gizmo_mode == "rotate":
+            _u, p, q = _gizmo_axis_frame(axis)
+            rel = tuple(grab[i] - center[i] for i in range(3))
+            # Rotation accumulates wrapped per-step increments (not a
+            # single wrapped total), so a drag past 180 degrees keeps
+            # turning instead of snapping back.
+            state["last_angle"] = math.atan2(
+                sum(rel[i] * q[i] for i in range(3)),
+                sum(rel[i] * p[i] for i in range(3)))
+            state["total_deg"] = 0.0
+        elif self.gizmo_mode == "scale":
+            state["grab_distance"] = sum(
+                (grab[i] - center[i]) * u[i] for i in range(3))
+        self._gizmo_drag = state
+        # The dragged handle stays bright for the whole drag.
+        self._gizmo_hover = axis
+        self.update()
+        return True
+
+    def _apply_drag_value(self, group, idx, value):
+        """Write one drag result into the object's base transform —
+        and into the key on this frame when the track has one there.
+        Keys override the base at their frames, so without the key
+        write a drag on a keyed object would move the inspector
+        numbers but not the object on screen. A drag never CREATES a
+        key: at an interpolated frame it edits the base only, the
+        same as the inspector does today."""
+        state = self._gizmo_drag
+        obj = next((o for o in self._scene["objects"]
+                    if o["id"] == state["object_id"]), None)
+        if obj is None:
+            return
+        obj[group][idx] = float(value)
+        keys = anim_mod.get_keys(self._scene, obj["id"], group)
+        if any(k[0] == self._frame for k in keys):
+            anim_mod.set_key(self._scene, obj["id"], group, self._frame,
+                             obj[group])
+
+    def _apply_gizmo_drag(self, x, y, shift=False):
+        """One drag step for the pointer at pixel (x, y). Move: the
+        ray meets the drag plane, the movement from the grab point
+        projects onto the axis. Rotate: the angle around the axis
+        from the grab point's position on the ring plane. Scale: the
+        pointer's distance from the centre along the axis, as a ratio
+        of the grab distance. Shift snaps the result (10 cm / 15
+        degrees / 0.1). A ray parallel to the drag plane skips the
+        step, keeping the last good value. Every step fires
+        transform_changed, so the inspector follows live."""
+        state = self._gizmo_drag
+        if state is None:
+            return
+        ray = self._pick_ray(x, y)
+        if ray is None:
+            return
+        origin, direction = ray
+        t = ray_vs_plane(origin, direction, state["plane_point"],
+                         state["plane_normal"])
+        if t is None:
+            return
+        point = tuple(origin[i] + direction[i] * t for i in range(3))
+        mode, axis = state["mode"], state["axis"]
+        idx = ("x", "y", "z").index(axis)
+        u = _gizmo_axis_frame(axis)[0]
+        if mode == "move":
+            delta = sum((point[i] - state["grab_point"][i]) * u[i]
+                        for i in range(3))
+            if shift:
+                delta = round(delta / GIZMO_SNAP_MOVE) * GIZMO_SNAP_MOVE
+            self._apply_drag_value(
+                "position", idx, state["start"]["position"][idx] + delta)
+        elif mode == "rotate":
+            _u, p, q = _gizmo_axis_frame(axis)
+            rel = tuple(point[i] - state["center"][i] for i in range(3))
+            angle = math.atan2(sum(rel[i] * q[i] for i in range(3)),
+                               sum(rel[i] * p[i] for i in range(3)))
+            inc = angle - state["last_angle"]
+            inc = (inc + math.pi) % (2.0 * math.pi) - math.pi
+            state["last_angle"] = angle
+            state["total_deg"] += math.degrees(inc)
+            delta_deg = state["total_deg"]
+            if shift:
+                delta_deg = (round(delta_deg / GIZMO_SNAP_ROTATE)
+                             * GIZMO_SNAP_ROTATE)
+            self._apply_drag_value(
+                "rotation", idx,
+                state["start"]["rotation"][idx] + delta_deg)
+        else:  # scale
+            dist = sum((point[i] - state["center"][i]) * u[i]
+                       for i in range(3))
+            grab_dist = state["grab_distance"]
+            ratio = (dist / grab_dist if abs(grab_dist) > 1e-6 else 1.0)
+            value = state["start"]["scale"][idx] * ratio
+            if shift:
+                value = round(value / GIZMO_SNAP_SCALE) * GIZMO_SNAP_SCALE
+            value = max(value, GIZMO_MIN_SCALE)
+            self._apply_drag_value("scale", idx, value)
+        self.transform_changed.emit()
+        self.update()
+
     # -- mouse ------------------------------------------------------------
     def mousePressEvent(self, event):
+        # A left press on a gizmo handle (T13) starts a drag — the
+        # handle wins over object picking and over orbit, and no
+        # press state is recorded, so the release cannot re-pick.
+        if event.button() == QtCore.Qt.LeftButton:
+            pos = event.position().toPoint()
+            hit = self.pick_gizmo(pos.x(), pos.y())
+            if hit is not None and self._start_gizmo_drag(hit[0], pos.x(),
+                                                          pos.y()):
+                super().mousePressEvent(event)
+                return
         self._drag_button = event.button()
         self._drag_pos = event.position().toPoint()
         self._press_pos = event.position().toPoint()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self._drag_pos is None:
+        pos = event.position().toPoint()
+        if self._gizmo_drag is not None:
+            shift = bool(event.modifiers() & QtCore.Qt.ShiftModifier)
+            self._apply_gizmo_drag(pos.x(), pos.y(), shift)
             super().mouseMoveEvent(event)
             return
-        pos = event.position().toPoint()
+        if self._drag_pos is None:
+            # No button held: hover-pick the gizmo (T13) so the
+            # handle under the pointer brightens.
+            hit = self.pick_gizmo(pos.x(), pos.y())
+            hover = hit[0] if hit is not None else None
+            if hover != self._gizmo_hover:
+                self._gizmo_hover = hover
+                self.update()
+            super().mouseMoveEvent(event)
+            return
         dx, dy = pos.x() - self._drag_pos.x(), pos.y() - self._drag_pos.y()
         self._drag_pos = pos
         if self._drag_button == QtCore.Qt.LeftButton:
@@ -1261,6 +1562,17 @@ class Viewport(QOpenGLWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._gizmo_drag is not None \
+                and event.button() == QtCore.Qt.LeftButton:
+            # End of a gizmo drag (T13): no re-pick — the press never
+            # selected anything, and the object under the handle is
+            # not the user's target. (No undo step is pushed here;
+            # that is T14's job.)
+            self._gizmo_drag = None
+            self._gizmo_hover = None
+            self.update()
+            super().mouseReleaseEvent(event)
+            return
         if (self._press_pos is not None
                 and event.button() == QtCore.Qt.LeftButton):
             moved = (event.position().toPoint() - self._press_pos).manhattanLength()
@@ -1274,6 +1586,13 @@ class Viewport(QOpenGLWidget):
         self._drag_pos = None
         self._press_pos = None
         super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event):
+        # The pointer left the viewport: drop the hover highlight.
+        if self._gizmo_hover is not None:
+            self._gizmo_hover = None
+            self.update()
+        super().leaveEvent(event)
 
     def wheelEvent(self, event):
         steps = event.angleDelta().y() / 120.0
