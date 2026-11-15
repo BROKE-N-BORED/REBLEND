@@ -1,0 +1,260 @@
+{
+  "name": "Particles demo",
+  "version": 2,
+  "objects": [
+    {
+      "id": "664593e32a9a",
+      "name": "Ground",
+      "shape": "plane",
+      "params": {
+        "size": [
+          600.0,
+          600.0
+        ]
+      },
+      "position": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kind": "object",
+      "smooth_shading": false,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#6b5a44",
+        "roughness": 0.9,
+        "metalness": 0.0,
+        "texture": "wood_grain"
+      }
+    },
+    {
+      "id": "f74eae90eb2f",
+      "name": "Fire",
+      "shape": "box",
+      "params": {
+        "size": [
+          10.0,
+          10.0,
+          10.0
+        ]
+      },
+      "position": [
+        -60.0,
+        0.0,
+        0.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kind": "emitter",
+      "smooth_shading": false,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#b0b0b0",
+        "roughness": 0.6,
+        "metalness": 0.0,
+        "texture": "none"
+      },
+      "emitter": {
+        "shape": "cone",
+        "box_size": [
+          20.0,
+          20.0,
+          20.0
+        ],
+        "sphere_radius": 10.0,
+        "rate": 80.0,
+        "lifetime": 0.8,
+        "lifetime_spread": 0.3,
+        "speed": 120.0,
+        "speed_spread": 0.3,
+        "spread": 20.0,
+        "size": 8.0,
+        "size_over_life": 0.2,
+        "color_start": "#ffdd55",
+        "color_end": "#ff3300",
+        "opacity": {
+          "fade_in": 0.05,
+          "fade_out": 0.4
+        },
+        "gravity_factor": -0.5,
+        "drag": 0.5,
+        "wind_response": 0.3,
+        "turbulence": 3.0,
+        "attract": null,
+        "collide": "none",
+        "seed": 0,
+        "preset": "fire"
+      }
+    },
+    {
+      "id": "b72620ff21cb",
+      "name": "Smoke",
+      "shape": "box",
+      "params": {
+        "size": [
+          10.0,
+          10.0,
+          10.0
+        ]
+      },
+      "position": [
+        60.0,
+        0.0,
+        0.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "kind": "emitter",
+      "smooth_shading": false,
+      "cast_shadow": true,
+      "receive_shadow": true,
+      "material": {
+        "base_color": "#b0b0b0",
+        "roughness": 0.6,
+        "metalness": 0.0,
+        "texture": "none"
+      },
+      "emitter": {
+        "shape": "point",
+        "box_size": [
+          20.0,
+          20.0,
+          20.0
+        ],
+        "sphere_radius": 10.0,
+        "rate": 30.0,
+        "lifetime": 3.0,
+        "lifetime_spread": 0.3,
+        "speed": 40.0,
+        "speed_spread": 0.3,
+        "spread": 25.0,
+        "size": 10.0,
+        "size_over_life": 3.0,
+        "color_start": "#999999",
+        "color_end": "#555555",
+        "opacity": {
+          "fade_in": 0.1,
+          "fade_out": 0.3
+        },
+        "gravity_factor": -0.15,
+        "drag": 1.0,
+        "wind_response": 0.8,
+        "turbulence": 5.0,
+        "attract": null,
+        "collide": "none",
+        "seed": 0,
+        "preset": "smoke"
+      }
+    }
+  ],
+  "cameras": [
+    {
+      "name": "Overview",
+      "position": [
+        320.0,
+        -320.0,
+        260.0
+      ],
+      "look_at": [
+        0.0,
+        0.0,
+        40.0
+      ]
+    }
+  ],
+  "lights": [
+    {
+      "name": "Key",
+      "kind": "key",
+      "position": [
+        -300.0,
+        -300.0,
+        400.0
+      ],
+      "color": "#ffffff",
+      "intensity": 0.9
+    },
+    {
+      "name": "Fill",
+      "kind": "fill",
+      "position": [
+        300.0,
+        -200.0,
+        150.0
+      ],
+      "color": "#cfe0ff",
+      "intensity": 0.45
+    },
+    {
+      "name": "Rim",
+      "kind": "rim",
+      "position": [
+        0.0,
+        400.0,
+        250.0
+      ],
+      "color": "#ffe8c8",
+      "intensity": 0.5
+    },
+    {
+      "name": "Ambient",
+      "kind": "ambient",
+      "position": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "color": "#ffffff",
+      "intensity": 0.35
+    }
+  ],
+  "world": {
+    "gravity": [
+      0.0,
+      0.0,
+      -981.0
+    ],
+    "wind": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "wind_gust": {
+      "amplitude": 0.0,
+      "frequency": 0.0
+    }
+  },
+  "animation": {
+    "fps": 24,
+    "end_frame": 48,
+    "keys": {}
+  }
+}

@@ -29,32 +29,58 @@ distance from the centre — Shift snaps (10 cm / 15 deg / 0.1), the
 hovered handle brightens, and the inspector follows live. Drags
 write the transform directly; one undo step per drag (T14), armed
 on press and committed on release through the window's live-edit
-snapshot.
+snapshot. Particles (T17): every live particle of every emitter is
+merged into one interleaved VBO per frame (position + color + size +
+alpha) and drawn with the points program in two calls by blend mode
+(alpha for smoke/dust/snow/rain/water, additive for fire/sparks),
+depth test on, depth write off. A scene with no live particles skips
+the draw entirely, so the tavern renders exactly as before.
+
+Frame stats (UI10): every paint is timed (one perf_counter pair per
+paint — nothing measurable) and the last 30 costs feed a rolling
+average, shared through frame_stats() for the window's FPS readout
+and the tuner below. Self-tuning quality (UI11): when paints arrive
+steadily and the rolling average stays over the 24 fps budget, the
+viewport steps down a quality ladder (smaller shadow map, shadows
+off, lower render scale) and steps back up when frames are fast
+again — hysteresis-guarded, no user-visible setting. Exports always
+render at full quality (full_quality), whatever level the tuner
+sits at.
 
 Units are cm, z-up.
 """
 from __future__ import annotations
 
+import contextlib
 import math
 import os
+import time
 from array import array
+from collections import deque
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtOpenGL import (QOpenGLBuffer, QOpenGLFramebufferObject,
-                              QOpenGLFunctions_3_3_Core, QOpenGLTexture,
+                              QOpenGLFunctions_3_3_Core, QOpenGLShader,
+                              QOpenGLShaderProgram, QOpenGLTexture,
                               QOpenGLVertexArrayObject)
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 import shiboken6
 
 from . import animation as anim_mod
 from . import meshfile as meshfile_mod
+from . import particles as particles_mod
 from . import shaders as shader_mod
-from .geometry import (apply_matrix, compose_matrix, local_bounds,
-                       mat_inverse, ray_hits_aabb, ray_vs_cylinder_segment,
+from .geometry import (GIZMO_MIN_SCALE, GIZMO_MODES, GIZMO_MOVE_TIP,
+                       GIZMO_PICK_TOLERANCE, GIZMO_RING_RADIUS,
+                       GIZMO_SCALE_CUBE_CENTER, GIZMO_SCALE_CUBE_HALF,
+                       GIZMO_SNAP_MOVE, GIZMO_SNAP_ROTATE, GIZMO_SNAP_SCALE,
+                       _gizmo_axis_frame, apply_matrix, compose_matrix,
+                       gizmo_lines, gizmo_size, local_bounds, mat_inverse,
+                       ray_hits_aabb, ray_vs_cylinder_segment,
                        ray_vs_plane, ray_vs_ring, tessellate,
                        tessellate_indexed)
 from .scene import default_smooth_shading, hex_to_rgb
-from .textures import build_qimage
+from .textures import build_qimage, merged_params
 
 # GL enum values (kept numeric, as in the Bench pattern, so the calls read
 # the same as the OpenGL docs). Core profile only — no fixed-function
@@ -67,10 +93,30 @@ GL_TRIANGLES = 0x0004
 GL_LINES = 0x0001
 GL_FLOAT = 0x1406
 GL_UNSIGNED_INT = 0x1405
+# Particle rendering (T17) enums: points + blending.
+GL_POINTS = 0x0000
+GL_BLEND = 0x0BE2
+GL_SRC_ALPHA = 0x0302
+GL_ONE_MINUS_SRC_ALPHA = 0x0303
+GL_ONE = 0x0001
+
+# Interleaved particle VBO layout (T17): position (3) + color (3) +
+# size (1) + alpha (1) = 8 floats, matching particles.PARTICLE_FLOATS
+# and the points program's attribute locations 0-3.
+PARTICLE_STRIDE = 32
+# The points vertex shader attenuates size by distance with
+# uPointScale = viewport_height / (2 * tan(fov / 2)); the viewport's
+# field of view is 45 degrees (see _matrices).
+POINTS_FOV_DEGREES = 45.0
 # Shadow map (T5) enums.
 GL_TEXTURE0 = 0x84C0
 GL_TEXTURE1 = 0x84C1
 GL_TEXTURE_2D = 0x0DE1
+# Render-scale blit (UI11): linear filtering on the scaled FBO's
+# texture, so the upscale is smooth, not blocky.
+GL_TEXTURE_MIN_FILTER = 0x2801
+GL_TEXTURE_MAG_FILTER = 0x2800
+GL_LINEAR = 0x2601
 GL_FRAMEBUFFER = 0x8D40
 GL_DEPTH_ATTACHMENT = 0x8D00
 GL_FRAMEBUFFER_COMPLETE = 0x8CD5
@@ -83,169 +129,78 @@ VERTEX_STRIDE = 32
 # One shadow map, key light only, 1024x1024 (T5).
 SHADOW_MAP_SIZE = 1024
 
+# Frame stats (UI10) + self-tuning quality (UI11).
+# The rolling average covers the last 30 paints; the readout appears
+# once 10 paints are measured (a single-frame grab shows the
+# placeholder, never a half-formed number).
+FRAME_STATS_WINDOW = 30
+FRAME_STATS_MIN_SAMPLES = 10
+# The fps floor is 24 fps (T20's promise): a paint slower than this
+# budget cannot hold it. The step-up threshold sits comfortably
+# below the budget, so the tuner cannot flicker between levels.
+FRAME_BUDGET_MS = 1000.0 / 24.0
+FRAME_FAST_MS = 20.0
+# Hysteresis: 30 consecutive slow samples to step down, 60
+# consecutive fast samples to step back up (recovery is twice as
+# slow as relief, so a scene hovering near the budget does not
+# oscillate — and the dead band between the two thresholds does the
+# rest). After a level change, 30 paints are ignored while the
+# rolling window flushes the old level's costs.
+TUNER_DOWN_FRAMES = 30
+TUNER_UP_FRAMES = 60
+TUNER_SETTLE_FRAMES = FRAME_STATS_WINDOW
+# Only sustained painting counts toward the tuner: a paint is a
+# load sample only when the app barely idled before it — the gap
+# from the END of the previous paint to the START of this one
+# must be under 500 ms. Playback at 24 fps idles ~0 ms between
+# paints (the next frame is requested as soon as the last
+# finishes); isolated demand paints — an orbit, a grab — idle
+# for seconds and never engage the tuner. The gap is
+# end-to-start, not start-to-start, so a slow paint does not
+# count against itself: a heavy scene painting back-to-back at
+# 150 ms a frame idles ~0 ms and is clearly sustained load,
+# while a light scene painted once every 400 ms idles 400 ms
+# and is not. (A start-to-start 200 ms window was tried first
+# and failed on the real heavy scene: the drive loop idles
+# ~195 ms mean / ~261 ms max between paints under sandbox
+# load, so every paint read as isolated and the tuner never
+# engaged. 500 ms has 2x margin over that max and is far below
+# the seconds separating isolated paints.)
+TUNER_CONTINUOUS_GAP_MS = 500.0
+# Quality ladder (UI11): (shadow map size or None for off, render
+# scale). Each level is strictly cheaper than the one before it:
+# full quality, smaller shadow map, shadows off, then two steps of
+# lower render scale.
+QUALITY_LEVELS = ((1024, 1.0), (512, 1.0), (None, 1.0),
+                  (None, 0.75), (None, 0.5))
+
+# Render-scale blit (UI11): a fullscreen triangle that samples the
+# scaled framebuffer's texture, upscaling it to the widget. No
+# vertex attributes — positions come from gl_VertexID — so it draws
+# with an empty VAO bound. Compiled inline here (viewport.py), not
+# in shaders.py: the blit is a viewport mechanism, not a scene
+# program.
+_BLIT_VERT = """#version 330 core
+out vec2 vUv;
+void main() {
+    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+    vUv = p;
+    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+"""
+_BLIT_FRAG = """#version 330 core
+in vec2 vUv;
+uniform sampler2D uTex;
+out vec4 fragColor;
+void main() { fragColor = texture(uTex, vUv); }
+"""
+
 # The grid + axes sit 0.5 cm below the ground plane (z = 0). Drawn at
 # exactly z = 0 they z-fight with any floor plane there and the grid
 # lines bleed through the floor — visible in v0.1 too, once you look.
 # 0.5 cm is far above depth-buffer precision at scene scale and far
 # below anything a user can see.
 GRID_Z = -0.5
-
-# Gizmo (T12): drawn with the lines program only, in unit space centred
-# on the selected object's position; the draw scales it by
-# gizmo_size(distance) so it stays the same size on screen. Axis colors
-# match the grid axes. Cones and cubes are wireframe outlines through
-# the lines program — T12 adds no solid-geometry pass.
-GIZMO_MODES = ("move", "rotate", "scale")
-GIZMO_AXIS_COLORS = {"x": (0.85, 0.25, 0.25),
-                     "y": (0.25, 0.75, 0.30),
-                     "z": (0.30, 0.45, 0.9)}
-# The gizmo's world-space size is distance * this factor. At the
-# 45-degree field of view the visible height at the target plane is
-# about 0.83 * distance, so 0.12 puts the gizmo at roughly 15% of the
-# viewport height whatever the zoom.
-GIZMO_SIZE_FACTOR = 0.12
-GIZMO_RING_SEGMENTS = 48
-GIZMO_CONE_SEGMENTS = 8
-# Handle extents in unit-gizmo space (T12 values, named in T13 so the
-# drawing and the picking share one source of truth — the builders
-# below and pick_gizmo both read these, so the pick can never drift
-# from what is drawn). Move: shaft to 0.75, cone base radius 0.09 at
-# 0.75, apex at 1.0. Rotate: ring radius 1.0. Scale: line to 0.7,
-# cube centred at 0.81 with half-side 0.11.
-GIZMO_MOVE_SHAFT_END = 0.75
-GIZMO_MOVE_TIP = 1.0
-GIZMO_CONE_BASE_RADIUS = 0.09
-GIZMO_RING_RADIUS = 1.0
-GIZMO_SCALE_LINE_END = 0.7
-GIZMO_SCALE_CUBE_CENTER = 0.81
-GIZMO_SCALE_CUBE_HALF = 0.11
-# Pick tolerance in unit-gizmo space (T13): the drawn lines have no
-# width, so the pick tests fatten each handle by this much — about
-# 11 screen pixels at the tavern view, a grabbable handle without
-# swallowing the scene around it.
-GIZMO_PICK_TOLERANCE = 0.12
-# Shift-snap steps (T13): move 10 cm, rotate 15 degrees, scale 0.1.
-GIZMO_SNAP_MOVE = 10.0
-GIZMO_SNAP_ROTATE = 15.0
-GIZMO_SNAP_SCALE = 0.1
-# A scale drag never takes an axis below this: 0 would collapse the
-# object and a negative would flip it inside out. The inspector still
-# accepts any value typed in — this clamp is drag-only.
-GIZMO_MIN_SCALE = 0.01
-
-
-def gizmo_size(distance):
-    """World-space gizmo size for a camera distance (T12): the gizmo
-    grows with distance so it keeps the same size on screen."""
-    return float(distance) * GIZMO_SIZE_FACTOR
-
-
-def _gizmo_axis_frame(axis):
-    """(unit, perp1, perp2) for an axis: the axis direction and two
-    perpendicular unit vectors, right-handed."""
-    frames = {"x": ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
-              "y": ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)),
-              "z": ((0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0))}
-    return frames[axis]
-
-
-def _gizmo_add(verts, a, b, color):
-    verts += [a[0], a[1], a[2], *color, b[0], b[1], b[2], *color]
-
-
-def _gizmo_bright(color):
-    """The hover highlight for an axis color (T13): each channel moved
-    55% toward white, so the hovered handle reads brighter without
-    changing hue."""
-    return tuple(c + (1.0 - c) * 0.55 for c in color)
-
-
-def _gizmo_move_axis(verts, axis, color):
-    """One move arrow: a shaft from the origin to 0.75, then a cone
-    outline — an 8-segment base circle of radius 0.09 at 0.75 and
-    four side lines to the apex at 1.0."""
-    u, p, q = _gizmo_axis_frame(axis)
-    tip = tuple(GIZMO_MOVE_SHAFT_END * v for v in u)
-    _gizmo_add(verts, (0.0, 0.0, 0.0), tip, color)
-    base = []
-    for i in range(GIZMO_CONE_SEGMENTS):
-        angle = 2.0 * math.pi * i / GIZMO_CONE_SEGMENTS
-        base.append(tuple(tip[j] + GIZMO_CONE_BASE_RADIUS
-                          * (math.cos(angle) * p[j]
-                             + math.sin(angle) * q[j])
-                          for j in range(3)))
-    for i in range(GIZMO_CONE_SEGMENTS):
-        _gizmo_add(verts, base[i], base[(i + 1) % GIZMO_CONE_SEGMENTS],
-                   color)
-    apex = tuple(GIZMO_MOVE_TIP * v for v in u)
-    for i in range(0, GIZMO_CONE_SEGMENTS, 2):
-        _gizmo_add(verts, base[i], apex, color)
-
-
-def _gizmo_rotate_axis(verts, axis, color):
-    """One rotate ring: a 48-segment circle of radius 1.0 in the
-    plane perpendicular to the axis."""
-    _u, p, q = _gizmo_axis_frame(axis)
-    ring = []
-    for i in range(GIZMO_RING_SEGMENTS):
-        angle = 2.0 * math.pi * i / GIZMO_RING_SEGMENTS
-        ring.append(tuple(GIZMO_RING_RADIUS
-                          * (math.cos(angle) * p[j]
-                             + math.sin(angle) * q[j])
-                          for j in range(3)))
-    for i in range(GIZMO_RING_SEGMENTS):
-        _gizmo_add(verts, ring[i], ring[(i + 1) % GIZMO_RING_SEGMENTS],
-                   color)
-
-
-def _gizmo_scale_axis(verts, axis, color):
-    """One scale handle: a short line from the origin to 0.7, ending
-    in a small cube outline (side 0.22) centred at 0.81 along the
-    axis."""
-    u, p, q = _gizmo_axis_frame(axis)
-    end = tuple(GIZMO_SCALE_LINE_END * v for v in u)
-    _gizmo_add(verts, (0.0, 0.0, 0.0), end, color)
-    centre = tuple(GIZMO_SCALE_CUBE_CENTER * v for v in u)
-    half = GIZMO_SCALE_CUBE_HALF
-    corners = []
-    for su in (-1.0, 1.0):
-        for sp in (-1.0, 1.0):
-            for sq in (-1.0, 1.0):
-                corners.append(tuple(
-                    centre[j] + half * (su * u[j] + sp * p[j] + sq * q[j])
-                    for j in range(3)))
-    # Corner order is (su, sp, sq) with each sign varying slowest to
-    # fastest; the edges join corners differing in exactly one sign.
-    edges = [(0, 1), (2, 3), (4, 5), (6, 7), (0, 2), (1, 3), (4, 6),
-             (5, 7), (0, 4), (1, 5), (2, 6), (3, 7)]
-    for a, b in edges:
-        _gizmo_add(verts, corners[a], corners[b], color)
-
-
-def gizmo_lines(mode, highlight=None):
-    """Interleaved pos(3)+color(3) floats for one gizmo mode, in unit
-    space centred on the origin (T12). The draw scales the unit gizmo
-    by gizmo_size(distance) and translates it to the selected
-    object's position. Raises ValueError on an unknown mode.
-    highlight (T13) is None or one axis ("x", "y", "z"): that axis's
-    lines come out in the bright hover color, the others unchanged."""
-    builders = {"move": _gizmo_move_axis,
-                "rotate": _gizmo_rotate_axis,
-                "scale": _gizmo_scale_axis}
-    build = builders.get(mode)
-    if build is None:
-        raise ValueError(f"unknown gizmo mode: {mode!r} "
-                         f"(expected one of {', '.join(GIZMO_MODES)})")
-    if highlight is not None and highlight not in ("x", "y", "z"):
-        raise ValueError(f"unknown gizmo highlight: {highlight!r} "
-                         "(expected None or one of 'x', 'y', 'z')")
-    verts = []
-    for axis in ("x", "y", "z"):
-        color = GIZMO_AXIS_COLORS[axis]
-        if axis == highlight:
-            color = _gizmo_bright(color)
-        build(verts, axis, color)
-    return verts
 
 
 def _interleaved(mesh):
@@ -321,6 +276,10 @@ class Viewport(QOpenGLWidget):
     # drag ends. No payload — the snapshot covers the whole scene.
     gizmo_drag_started = QtCore.Signal()
     gizmo_drag_finished = QtCore.Signal()
+    # Frame stats (UI10): fired after every paint that was measured.
+    # The window updates its FPS readout from frame_stats(); no
+    # payload — the numbers live on the viewport.
+    frame_stats_changed = QtCore.Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -360,19 +319,73 @@ class Viewport(QOpenGLWidget):
         # Mesh objects are indexed by definition (T7, via _is_indexed)
         # and never need this hook.
         self._indexed = set()
-        self._textures = {}  # (texture name, base color) -> QOpenGLTexture
+        self._textures = {}  # (texture name, base color, params) -> QOpenGLTexture
+        # Hover-preview (UI12): (object id, material overrides) or
+        # None. While set, that one object renders with the
+        # overrides instead of its stored material; the scene is
+        # untouched, so leaving the preview restores the object
+        # exactly. The window sets this on combo highlight and
+        # clears it when the popup closes or a pick applies.
+        self._material_preview = None
         # Shadow map (T5): one 1024x1024 depth map from the key light.
         # _shadow_fbo is a QOpenGLFramebufferObject (NoAttachment) whose
         # handle carries the depth texture; _shadow_tex is the depth
         # texture itself. _shadow_error is set (plain words) when the
         # map could not be built — the scene still renders, shadowless.
+        # _shadow_size is the size the map is built at now (UI11: the
+        # tuner rebuilds it smaller, or drops it entirely).
         self._shadow_fbo = None
         self._shadow_tex = None
         self._shadow_error = None
+        self._shadow_size = SHADOW_MAP_SIZE
+        # Frame stats (UI10) + self-tuning quality (UI11).
+        # _frame_times holds the last FRAME_STATS_WINDOW paint costs
+        # in ms. _skip_next_frame_time drops the first paint after a
+        # scene load: it builds every VBO at once (a one-time setup
+        # cost, ~1 s on the tavern in the sandbox), which says
+        # nothing about the scene's sustained frame rate.
+        self._frame_times = deque(maxlen=FRAME_STATS_WINDOW)
+        self._skip_next_frame_time = True
+        self._last_paint_end = None
+        # Test hook (UI11): extra seconds slept inside each paint,
+        # so a test can drive the tuner with a slow scene without
+        # building one. Always 0 in real use.
+        self._paint_delay = 0.0
+        # Tuner state (UI11): the current ladder level, the
+        # consecutive slow/fast streaks, and the settle countdown
+        # after a level change. _quality_override counts nested
+        # full_quality() uses (exports); while it is nonzero the
+        # effective level is 0 and the tuner does not count.
+        self._quality_level = 0
+        self._tuner_slow = 0
+        self._tuner_fast = 0
+        self._tuner_settle = 0
+        self._quality_override = 0
+        # Render scale (UI11): the scaled FBO + blit program, built
+        # lazily on the first scaled paint and rebuilt when the
+        # widget size or the scale changes. _target_fbo/_target_size
+        # are the framebuffer + viewport the current paint draws
+        # into (the widget's own FBO at full scale); the shadow pass
+        # restores them, not the widget FBO directly.
+        self._scale_fbo = None
+        self._scale_fbo_size = None
+        self._blit_program = None
+        self._blit_vao = None
+        self._target_fbo = None
+        self._target_size = (0, 0)
         self._grid = None    # (vao, vbo, vertex count, span key)
         self._sel_vao = None  # unit-cube edge VAO for the selection box
         self._sel_vbo = None
         self._sel_count = 0
+        # Particles (T17): one VAO + one VBO, created lazily on the
+        # first paint that has live particles and reused after — the
+        # VBO's storage is re-uploaded every frame, the VAO's
+        # attribute bindings never change. _particle_count is the
+        # live count from the last paint (0 for a scene with no
+        # emitters, or before the first paint).
+        self._particle_vao = None
+        self._particle_vbo = None
+        self._particle_count = 0
         self._frame = 0
         self.selected_id = None
         # Gizmo (T12): the transform mode, default Move. One VAO per
@@ -414,7 +427,19 @@ class Viewport(QOpenGLWidget):
         self.selected_id = None
         self._mesh_assets = {}
         self._mesh_paths = {}
+        # A new scene invalidates a preview (UI12): the previewed
+        # object belongs to the old scene.
+        self._material_preview = None
         self._drop_vbos()
+        # A new scene has its own load: the old scene's frame times
+        # and tuner streaks describe nothing about it, so they go —
+        # and the next paint (a full VBO rebuild) is skipped, the
+        # same as the first paint after construction.
+        self._frame_times.clear()
+        self._tuner_slow = 0
+        self._tuner_fast = 0
+        self._tuner_settle = 0
+        self._skip_next_frame_time = True
         self.frame()
         self.update()
 
@@ -504,6 +529,25 @@ class Viewport(QOpenGLWidget):
         the live view as soon as the grab is done."""
         self._gizmo_suppressed = bool(suppressed)
         self.update()
+
+    def set_material_preview(self, obj_id, overrides):
+        """Hover-preview (UI12): render one object with these
+        material values instead of its stored ones — a fragment
+        of a material dict (roughness, metalness, texture,
+        base_color). The scene is untouched: the preview lives
+        only in the viewport until clear_material_preview. The
+        overrides are copied, so the caller keeps its own dict."""
+        self._material_preview = (obj_id, dict(overrides))
+        self.update()
+
+    def clear_material_preview(self):
+        """End a hover-preview (UI12): the object renders from
+        its stored material again. Idempotent — safe to call
+        from every exit path, and a no-op repaint when nothing
+        is previewed."""
+        if self._material_preview is not None:
+            self._material_preview = None
+            self.update()
 
     def _gizmo_center(self):
         """Sampled world position of the selected object — the point
@@ -638,6 +682,19 @@ class Viewport(QOpenGLWidget):
             except Exception:
                 pass
         self._gizmo_vaos = {}
+        if self._particle_vao is not None:
+            try:
+                self._particle_vao.destroy()
+            except Exception:
+                pass
+            self._particle_vao = None
+        if self._particle_vbo is not None:
+            try:
+                self._particle_vbo.destroy()
+            except Exception:
+                pass
+            self._particle_vbo = None
+        self._particle_count = 0
         for tex in self._textures.values():
             try:
                 tex.destroy()
@@ -656,6 +713,18 @@ class Viewport(QOpenGLWidget):
             except Exception:
                 pass
             self._shadow_tex = None
+        # Render scale (UI11): the scaled FBO + blit program have no
+        # destroy() in this build — dropping the references frees
+        # them. The blit VAO does have one.
+        self._scale_fbo = None
+        self._scale_fbo_size = None
+        self._blit_program = None
+        if self._blit_vao is not None:
+            try:
+                self._blit_vao.destroy()
+            except Exception:
+                pass
+            self._blit_vao = None
         self._programs = {}
         self._mesh_assets = {}
         self._mesh_paths = {}
@@ -736,12 +805,22 @@ class Viewport(QOpenGLWidget):
         self._vbos[obj["id"]] = entry
         return entry
 
-    def _ensure_texture(self, name, base_color):
-        key = (name, base_color)
+    def _ensure_texture(self, name, base_color, params=None):
+        # The cache key includes the merged params (PO2): a knob
+        # change bakes a new texture instead of reusing the old
+        # one. Merged (defaults + overrides), so "no params" and
+        # "params equal to the defaults" share one entry — and
+        # the key is built from the same merge the bake uses, so
+        # the two can never disagree. Each distinct param set
+        # costs one 128x128 texture (~64 KB); the cache is
+        # cleared on set_scene, so a long session stays small.
+        merged = merged_params(name, params)
+        key = (name, base_color, tuple(sorted(merged.items())))
         tex = self._textures.get(key)
         if tex is not None:
             return tex
-        img = build_qimage(name, hex_to_rgb(base_color), size=128)
+        img = build_qimage(name, hex_to_rgb(base_color), size=128,
+                           params=merged)
         tex = QOpenGLTexture(img)
         tex.setMinificationFilter(QOpenGLTexture.LinearMipMapLinear)
         tex.setMagnificationFilter(QOpenGLTexture.Linear)
@@ -883,6 +962,41 @@ class Viewport(QOpenGLWidget):
         gl = self._gl
         if gl is None or self._shader_error is not None:
             return
+        # Frame stats (UI10): one perf_counter pair around the paint
+        # — the measurement itself costs nothing measurable.
+        start = time.perf_counter()
+        try:
+            self._paint_scene(gl)
+        finally:
+            self._record_frame(start)
+
+    def _paint_scene(self, gl):
+        # Test hook (UI11): a slow scene, simulated.
+        if self._paint_delay:
+            time.sleep(self._paint_delay)
+        # The effective quality may have changed since the last
+        # paint (a tuner step, or an export override): the shadow
+        # map is rebuilt lazily here, where the context is current.
+        shadow_size, scale = self._effective_quality()
+        if shadow_size != self._shadow_size:
+            self._rebuild_shadow_map(shadow_size)
+        # The target this paint draws into: the widget's own FBO at
+        # full scale, the scaled FBO below it (only when the blit
+        # program is available — without it there is no way to get
+        # the scaled image onto the widget, so the paint stays full
+        # size instead of showing a stale frame).
+        fbo = None
+        if scale < 1.0 and self._ensure_blit_program() is not None:
+            fbo = self._ensure_scale_fbo(scale)
+        if fbo is not None:
+            self._target_fbo = fbo.handle()
+            self._target_size = self._scale_fbo_size
+            gl.glBindFramebuffer(GL_FRAMEBUFFER, fbo.handle())
+            gl.glViewport(0, 0, *self._scale_fbo_size)
+        else:
+            self._target_fbo = self.defaultFramebufferObject()
+            self._target_size = (max(1, self.width()),
+                                 max(1, self.height()))
         # Shadow pass first (T5): the scene from the key light into
         # the depth map. It runs on every paint, which is also every
         # scene change — Qt only repaints when something asked for
@@ -896,10 +1010,142 @@ class Viewport(QOpenGLWidget):
         self._draw_grid(gl, proj, view)
         if self._scene:
             self._draw_objects(gl, proj, view, light_space)
+            # Particles (T17) draw after the opaque objects and
+            # before the selection box and gizmo: they are transparent
+            # scene content, so they need the depth buffer filled and
+            # must not write to it themselves.
+            self._draw_particles(gl, proj, view)
             if self.selected_id:
                 self._draw_selection(gl, proj, view)
                 if not self._gizmo_suppressed:
                     self._draw_gizmo(gl, proj, view)
+        if fbo is not None:
+            self._blit_to_widget(gl, fbo)
+
+    # -- frame stats (UI10) + self-tuning quality (UI11) -------------
+    def frame_stats(self):
+        """(fps, ms_per_frame, samples): the rolling average paint
+        cost over the last FRAME_STATS_WINDOW paints, as the frame
+        rate the viewport can sustain. (None, None, n) while fewer
+        than FRAME_STATS_MIN_SAMPLES paints are measured — the
+        readout shows nothing until the average means something."""
+        n = len(self._frame_times)
+        if n < FRAME_STATS_MIN_SAMPLES:
+            return None, None, n
+        avg_ms = sum(self._frame_times) / n
+        if avg_ms <= 0:
+            return None, avg_ms, n
+        return 1000.0 / avg_ms, avg_ms, n
+
+    def quality_info(self):
+        """(level, shadow_size, render_scale) for the effective
+        quality right now — level 0 while an export override is
+        active. Tests and the verify script read this; the UI never
+        shows it (UI11 has no user-visible setting)."""
+        shadow_size, scale = self._effective_quality()
+        level = 0 if self._quality_override else self._quality_level
+        return level, shadow_size, scale
+
+    def _effective_quality(self):
+        if self._quality_override:
+            return QUALITY_LEVELS[0]
+        return QUALITY_LEVELS[self._quality_level]
+
+    def _record_frame(self, start):
+        now = time.perf_counter()
+        if self._skip_next_frame_time:
+            self._skip_next_frame_time = False
+            self._last_paint_end = now
+            return
+        # Sustained load is measured by IDLE time: how long the
+        # app sat between the previous paint finishing and this
+        # one starting. A slow paint does not count against
+        # itself (see TUNER_CONTINUOUS_GAP_MS).
+        continuous = (self._last_paint_end is not None
+                      and (start - self._last_paint_end) * 1000.0
+                      <= TUNER_CONTINUOUS_GAP_MS)
+        self._last_paint_end = now
+        self._record_frame_time((now - start) * 1000.0, continuous)
+
+    def _record_frame_time(self, cost_ms, continuous):
+        """Feed one measured paint cost (ms) into the rolling
+        average and the tuner. Split from _record_frame so tests
+        can drive the tuner with synthetic costs instead of real
+        paints; continuous says whether this paint arrived close
+        after the previous one (sustained load) or on its own."""
+        self._frame_times.append(cost_ms)
+        if self._quality_override == 0:
+            self._tuner_step(continuous)
+        self.frame_stats_changed.emit()
+
+    def _tuner_step(self, continuous):
+        if not continuous:
+            # An isolated paint is not sustained load: it breaks
+            # both streaks, so a single slow paint (an orbit, a
+            # grab) can never step the quality down.
+            self._tuner_slow = 0
+            self._tuner_fast = 0
+            return
+        if self._tuner_settle > 0:
+            self._tuner_settle -= 1
+            return
+        _fps, avg_ms, _n = self.frame_stats()
+        if avg_ms is None:
+            return
+        if avg_ms > FRAME_BUDGET_MS:
+            self._tuner_slow += 1
+            self._tuner_fast = 0
+            if (self._tuner_slow >= TUNER_DOWN_FRAMES
+                    and self._quality_level < len(QUALITY_LEVELS) - 1):
+                self._set_quality_level(self._quality_level + 1)
+        elif avg_ms < FRAME_FAST_MS:
+            self._tuner_fast += 1
+            self._tuner_slow = 0
+            if (self._tuner_fast >= TUNER_UP_FRAMES
+                    and self._quality_level > 0):
+                self._set_quality_level(self._quality_level - 1)
+        else:
+            # Between the thresholds: hold. Neither streak grows,
+            # so a scene hovering near the budget never flickers.
+            self._tuner_slow = 0
+            self._tuner_fast = 0
+
+    def _set_quality_level(self, level):
+        level = max(0, min(len(QUALITY_LEVELS) - 1, level))
+        if level == self._quality_level:
+            return
+        self._quality_level = level
+        self._tuner_slow = 0
+        self._tuner_fast = 0
+        self._tuner_settle = TUNER_SETTLE_FRAMES
+        # The shadow map + scaled FBO change lazily on the next
+        # paint, where the GL context is current; this just asks
+        # for that paint.
+        self.update()
+
+    @contextlib.contextmanager
+    def full_quality(self):
+        """Force full quality (level 0) for the duration: exports
+        render at full quality even when the tuner has stepped
+        down. Re-entrant — nested uses share one override, so an
+        export loop and its per-frame grab can both hold it. The
+        tuner does not count paints while the override is active
+        (an export is a batch render, not interactive load), and
+        its streaks restart when the override lifts."""
+        self._quality_override += 1
+        if self._quality_override == 1:
+            self._tuner_slow = 0
+            self._tuner_fast = 0
+            self.update()
+        try:
+            yield
+        finally:
+            self._quality_override -= 1
+            if self._quality_override == 0:
+                self._tuner_slow = 0
+                self._tuner_fast = 0
+                self._tuner_settle = TUNER_SETTLE_FRAMES
+                self.update()
 
     def _light_uniforms(self, prog):
         """Set the pbr_lite light uniforms from the scene lights."""
@@ -931,8 +1177,8 @@ class Viewport(QOpenGLWidget):
             prog.setUniformValue(f"uLightColor[{i}]", QtGui.QVector3D(*color))
 
     # -- shadow map (T5) -------------------------------------------------
-    def _build_shadow_map(self):
-        """Create the depth-only FBO + 1024x1024 depth texture.
+    def _build_shadow_map(self, size=SHADOW_MAP_SIZE):
+        """Create the depth-only FBO + depth texture at (size, size).
 
         PySide6 gap, found while building this: this PySide6 build
         binds no glGenFramebuffers / glGenTextures on any
@@ -947,7 +1193,7 @@ class Viewport(QOpenGLWidget):
         try:
             tex = QOpenGLTexture(QOpenGLTexture.Target2D)
             tex.setFormat(QOpenGLTexture.D32F)
-            tex.setSize(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE)
+            tex.setSize(size, size)
             tex.setMinificationFilter(QOpenGLTexture.Nearest)
             tex.setMagnificationFilter(QOpenGLTexture.Nearest)
             tex.setWrapMode(QOpenGLTexture.ClampToEdge)
@@ -955,7 +1201,7 @@ class Viewport(QOpenGLWidget):
             if not tex.isCreated():
                 raise RuntimeError("the depth texture did not allocate")
             fbo = QOpenGLFramebufferObject(
-                QtCore.QSize(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE),
+                QtCore.QSize(size, size),
                 QOpenGLFramebufferObject.NoAttachment)
             if not fbo.isValid():
                 raise RuntimeError("the shadow framebuffer did not create")
@@ -983,6 +1229,30 @@ class Viewport(QOpenGLWidget):
         self._shadow_fbo = fbo
         self._shadow_tex = tex
         self._shadow_error = None
+
+    def _rebuild_shadow_map(self, size):
+        """Rebuild the shadow map at a new size (UI11), or drop it
+        when size is None (shadows off). Runs inside a paint, where
+        the context is current. A rebuild that fails leaves the
+        scene shadowless with _shadow_error set, the same degraded
+        path as the first build."""
+        if self._shadow_fbo is not None:
+            try:
+                self._shadow_fbo.destroy()
+            except Exception:
+                pass
+            self._shadow_fbo = None
+        if self._shadow_tex is not None:
+            try:
+                self._shadow_tex.destroy()
+            except Exception:
+                pass
+            self._shadow_tex = None
+        self._shadow_size = size
+        if size is None:
+            self._shadow_error = None
+            return
+        self._build_shadow_map(size)
 
     def _key_light_position(self):
         """The key light's position, or the default key position when
@@ -1067,7 +1337,7 @@ class Viewport(QOpenGLWidget):
         if self._shadow_fbo is None:
             return
         gl.glBindFramebuffer(GL_FRAMEBUFFER, self._shadow_fbo.handle())
-        gl.glViewport(0, 0, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE)
+        gl.glViewport(0, 0, self._shadow_size, self._shadow_size)
         gl.glClear(GL_DEPTH_BUFFER_BIT)
         gl.glEnable(GL_POLYGON_OFFSET_FILL)
         gl.glPolygonOffset(2.0, 2.0)
@@ -1090,8 +1360,103 @@ class Viewport(QOpenGLWidget):
             vao.release()
         prog.release()
         gl.glDisable(GL_POLYGON_OFFSET_FILL)
-        gl.glBindFramebuffer(GL_FRAMEBUFFER, self.defaultFramebufferObject())
-        gl.glViewport(0, 0, max(1, self.width()), max(1, self.height()))
+        # Restore the paint's target (UI11): the widget's own FBO at
+        # full scale, the scaled FBO below it. _paint_scene sets the
+        # target before the shadow pass runs.
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, self._target_fbo)
+        gl.glViewport(0, 0, *self._target_size)
+
+    # -- render scale (UI11) ---------------------------------------------
+    def _ensure_scale_fbo(self, scale):
+        """The framebuffer the scene renders into at a lower render
+        scale: (width*scale, height*scale), color + depth. Rebuilt
+        when the widget size or the scale changes; None when it
+        cannot be built (the paint falls back to full size)."""
+        width = max(1, int(self.width() * scale))
+        height = max(1, int(self.height() * scale))
+        if (self._scale_fbo is not None
+                and self._scale_fbo_size == (width, height)):
+            return self._scale_fbo
+        self._destroy_scale_fbo()
+        try:
+            fbo = QOpenGLFramebufferObject(
+                QtCore.QSize(width, height),
+                QOpenGLFramebufferObject.CombinedDepthStencil)
+            if not fbo.isValid():
+                return None
+            # Linear filtering on the color texture, so the upscale
+            # blit is smooth instead of blocky.
+            gl = self._gl
+            gl.glBindTexture(GL_TEXTURE_2D, fbo.texture())
+            gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                               GL_LINEAR)
+            gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
+                               GL_LINEAR)
+            gl.glBindTexture(GL_TEXTURE_2D, 0)
+        except Exception:
+            return None
+        self._scale_fbo = fbo
+        self._scale_fbo_size = (width, height)
+        return fbo
+
+    def _destroy_scale_fbo(self):
+        # QOpenGLFramebufferObject has no destroy() in this PySide6
+        # build — dropping the reference frees it, the same as the
+        # shadow FBO's cleanup path.
+        self._scale_fbo = None
+        self._scale_fbo_size = None
+
+    def _ensure_blit_program(self):
+        """The render-scale blit program, compiled once from the
+        inline GLSL above. None when it cannot compile — a compile
+        failure is deterministic, so it is cached (as False) and
+        not retried; the paint falls back to full size."""
+        if self._blit_program is not None:
+            return self._blit_program or None
+        prog = QOpenGLShaderProgram()
+        ok = prog.addShaderFromSourceCode(QOpenGLShader.Vertex,
+                                          _BLIT_VERT)
+        ok = prog.addShaderFromSourceCode(QOpenGLShader.Fragment,
+                                          _BLIT_FRAG) and ok
+        ok = prog.link() and ok
+        if not ok:
+            self._blit_program = False
+            return None
+        self._blit_program = prog
+        return prog
+
+    def _blit_to_widget(self, gl, fbo):
+        """Upscale the scaled framebuffer onto the widget: bind the
+        widget's FBO, draw the scaled color texture as a fullscreen
+        triangle. Depth test off (the widget FBO's depth buffer is
+        stale — it was never cleared this paint) and blending off
+        (the blit replaces, never blends)."""
+        prog = self._ensure_blit_program()
+        if prog is None:
+            return
+        if self._blit_vao is None:
+            vao = QOpenGLVertexArrayObject()
+            if not vao.create():
+                return
+            self._blit_vao = vao
+        gl.glBindFramebuffer(GL_FRAMEBUFFER,
+                             self.defaultFramebufferObject())
+        gl.glViewport(0, 0, max(1, self.width()),
+                      max(1, self.height()))
+        gl.glDisable(GL_DEPTH_TEST)
+        gl.glDisable(GL_BLEND)
+        try:
+            gl.glActiveTexture(GL_TEXTURE0)
+            gl.glBindTexture(GL_TEXTURE_2D, fbo.texture())
+            prog.bind()
+            _set_scalar(gl, prog, "uTex", 0)
+            self._blit_vao.bind()
+            gl.glDrawArrays(GL_TRIANGLES, 0, 3)
+            self._blit_vao.release()
+            prog.release()
+            gl.glBindTexture(GL_TEXTURE_2D, 0)
+        finally:
+            gl.glEnable(GL_DEPTH_TEST)
 
     def _ensure_grid_vao(self, span):
         """Grid + axes VAO, rebuilt only when the scene span changes."""
@@ -1183,6 +1548,14 @@ class Viewport(QOpenGLWidget):
         for obj in self._scene["objects"]:
             _buf, vao, _ibo, count, indexed, _key = self._ensure_vbo(obj)
             mat = obj.get("material", {})
+            # Hover-preview (UI12): the previewed object renders
+            # with the overrides instead of its stored values.
+            # The copy keeps the scene's dict untouched, and the
+            # VBO is keyed on geometry, not material, so a preview
+            # costs no rebuild — it is instant by construction.
+            if (self._material_preview is not None
+                    and obj.get("id") == self._material_preview[0]):
+                mat = {**mat, **self._material_preview[1]}
             r, g, b = hex_to_rgb(mat.get("base_color", "#b0b0b0"))
             roughness = float(mat.get("roughness", 0.6))
             metalness = float(mat.get("metalness", 0.0))
@@ -1202,7 +1575,8 @@ class Viewport(QOpenGLWidget):
             _set_scalar(gl, prog, "uUseShadow", 1 if receive else 0)
             if texture and texture != "none":
                 self._ensure_texture(
-                    texture, mat.get("base_color", "#b0b0b0")).bind()
+                    texture, mat.get("base_color", "#b0b0b0"),
+                    mat.get("params")).bind()
                 _set_scalar(gl, prog, "uUseTexture", 1)
             else:
                 _set_scalar(gl, prog, "uUseTexture", 0)
@@ -1214,6 +1588,84 @@ class Viewport(QOpenGLWidget):
             else:
                 gl.glDrawArrays(GL_TRIANGLES, 0, count)
             vao.release()
+        prog.release()
+
+    # -- particles (T17) ---------------------------------------------------
+    def _ensure_particle_vao(self):
+        """The particle VAO + VBO, created once and reused: attribute
+        locations match the points program (0 position, 1 color,
+        2 size, 3 alpha) over the 32-byte interleaved stride. The
+        VBO's storage is re-uploaded every frame by _draw_particles;
+        the VAO's bindings reference the buffer object, not its
+        storage, so they survive the re-upload. See _line_vao for
+        the PySide6 attribute-pointer arg quirks."""
+        if self._particle_vao is not None:
+            return self._particle_vao, self._particle_vbo
+        gl = self._gl
+        vao = QOpenGLVertexArrayObject()
+        vao.create()
+        vao.bind()
+        buf = QOpenGLBuffer(QOpenGLBuffer.VertexBuffer)
+        buf.create()
+        buf.setUsagePattern(QOpenGLBuffer.DynamicDraw)
+        buf.bind()
+        for loc, size, offset in ((0, 3, 0), (1, 3, 12), (2, 1, 24),
+                                  (3, 1, 28)):
+            gl.glEnableVertexAttribArray(loc)
+            gl.glVertexAttribPointer(loc, size, GL_FLOAT, 0,
+                                     PARTICLE_STRIDE,
+                                     shiboken6.VoidPtr(offset))
+        buf.release()
+        vao.release()
+        self._particle_vao = vao
+        self._particle_vbo = buf
+        return vao, buf
+
+    def _draw_particles(self, gl, proj, view):
+        """Draw every live particle of every emitter (T17): one merged
+        VBO upload per frame, two draw calls by blend mode. Alpha
+        particles (smoke, dust, snow, rain, water) blend normally;
+        additive particles (fire, sparks) add their light. Depth
+        test stays on (particles hide behind solid objects) and
+        depth write is off (they never occlude each other). With no
+        live particles this returns before any GL call — a scene
+        without emitters renders exactly as it did in T16."""
+        data = particles_mod.build_render_data(self._scene, self._frame)
+        self._particle_count = data["total"]
+        if data["total"] == 0:
+            return
+        vao, buf = self._ensure_particle_vao()
+        raw = data["data"].tobytes()
+        buf.bind()
+        buf.allocate(raw, len(raw))
+        buf.release()
+        prog = self._programs["points"]
+        prog.bind()
+        prog.setUniformValue("uProj", proj)
+        prog.setUniformValue("uView", view)
+        # Point size in cm becomes pixels by distance attenuation:
+        # the vertex shader multiplies size by uPointScale / distance,
+        # where uPointScale is viewport_height / (2 * tan(fov / 2)).
+        # The height is the paint target's (UI11): at full scale it
+        # is the widget height, as before; at a lower render scale
+        # the points are sized for the scaled buffer, then upscaled
+        # to the same on-screen size.
+        point_scale = max(1, self._target_size[1]) / (
+            2.0 * math.tan(math.radians(POINTS_FOV_DEGREES / 2.0)))
+        _set_scalar(gl, prog, "uPointScale", point_scale)
+        gl.glDepthMask(False)
+        gl.glEnable(GL_BLEND)
+        vao.bind()
+        if data["alpha_count"] > 0:
+            gl.glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            gl.glDrawArrays(GL_POINTS, 0, data["alpha_count"])
+        if data["additive_count"] > 0:
+            gl.glBlendFunc(GL_SRC_ALPHA, GL_ONE)
+            gl.glDrawArrays(GL_POINTS, data["alpha_count"],
+                            data["additive_count"])
+        vao.release()
+        gl.glDisable(GL_BLEND)
+        gl.glDepthMask(True)
         prog.release()
 
     def _draw_selection(self, gl, proj, view):

@@ -131,6 +131,16 @@ class VideoExporter:
         self.frames_written += 1
         return True
 
+    def _close_stderr(self):
+        """Close ffmpeg's stderr pipe (F1): Popen opened it, and
+        leaving it open leaks a file descriptor — the headless suite
+        warned about the unclosed file on every export."""
+        try:
+            if self._proc is not None and self._proc.stderr is not None:
+                self._proc.stderr.close()
+        except OSError:
+            pass
+
     def finish(self):
         """Close stdin, wait for ffmpeg, return (ok, stderr text).
         ok is False when ffmpeg exited non-zero; the stderr text
@@ -147,10 +157,12 @@ class VideoExporter:
         except subprocess.TimeoutExpired:
             self._proc.kill()
             self._proc.wait()
+            self._close_stderr()
             return False, "ffmpeg did not finish after stdin closed"
         stderr = b""
         if self._proc.stderr is not None:
             stderr = self._proc.stderr.read()
+            self._close_stderr()
         if self._proc.returncode != 0:
             return False, stderr.decode("utf-8", "replace").strip()
         return True, ""
@@ -171,6 +183,7 @@ class VideoExporter:
                     self._proc.stdin.close()
             except (BrokenPipeError, OSError):
                 pass
+            self._close_stderr()
         try:
             os.unlink(self.output_path)
         except OSError:

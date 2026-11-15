@@ -114,14 +114,14 @@ def _read_chunks(data):
     (trailing bytes are ignored) but never longer (truncated)."""
     if len(data) < 12:
         raise GlbError(
-            f"the file is only {len(data)} bytes — too small to be a "
+            f"the file is only {len(data)} bytes, too small to be a "
             ".glb file")
     magic, version, length = struct.unpack_from("<III", data, 0)
     if magic != _MAGIC:
-        raise GlbError("not a .glb file — it does not start with 'glTF'")
+        raise GlbError("not a .glb file. It does not start with 'glTF'")
     if version != 2:
         raise GlbError(
-            f"glTF version {version} is not supported — only version 2")
+            f"glTF version {version} is not supported, only version 2")
     if length > len(data):
         raise GlbError(
             f"the file is truncated (it says {length} bytes, but has "
@@ -133,8 +133,8 @@ def _read_chunks(data):
         chunk_len, chunk_type = struct.unpack_from("<II", data, offset)
         offset += 8
         if offset + chunk_len > len(data):
-            raise GlbError("a chunk runs past the end of the file — "
-                           "the file is truncated")
+            raise GlbError("a chunk runs past the end of the file, "
+                           "so the file is truncated")
         chunk = data[offset:offset + chunk_len]
         offset += chunk_len
         if chunk_type == _CHUNK_JSON and json_bytes is None:
@@ -198,8 +198,8 @@ def _read_accessor(gltf, bin_data, index, what):
         raise GlbError(f"bufferView {view_index} is not an object")
     if view.get("buffer", 0) != 0:
         raise GlbError(
-            f"bufferView {view_index} uses buffer {view.get('buffer')} "
-            "— a .glb file carries one embedded buffer")
+            f"bufferView {view_index} uses buffer {view.get('buffer')}. "
+            "A .glb file carries one embedded buffer")
     base = (view.get("byteOffset") or 0) + (accessor.get("byteOffset") or 0)
     comp_size = _COMPONENT_SIZES[comp_type]
     elem_size = components * comp_size
@@ -303,14 +303,14 @@ def _world_matrices(gltf, warnings):
             return
         if not isinstance(index, int) or index < 0 or index >= len(nodes):
             warnings.append(
-                f"node {index} is referenced but does not exist — "
-                "it was skipped.")
+                f"node {index} is referenced but does not exist, "
+                "so it was skipped.")
             return
         visited.add(index)
         node = nodes[index]
         if not isinstance(node, dict):
             warnings.append(
-                f"node {index} is not an object — it was skipped.")
+                f"node {index} is not an object, so it was skipped.")
             return
         name = node.get("name") or f"node {index}"
         local = _node_local_matrix(node, name)
@@ -379,7 +379,7 @@ def _material_for(gltf, index, warnings, mesh_name):
     if not isinstance(index, int) or index < 0 or index >= len(materials):
         warnings.append(
             f"mesh '{mesh_name}' refers to material {index}, which "
-            "does not exist — the default color is used.")
+            "does not exist, so the default color is used.")
         return {"base_color": DEFAULT_COLOR}
     material = materials[index]
     if not isinstance(material, dict):
@@ -396,15 +396,15 @@ def _material_for(gltf, index, warnings, mesh_name):
             color = _rgb_to_hex(factor[0], factor[1], factor[2])
         except (TypeError, ValueError):
             warnings.append(
-                f"material '{name}' has a bad base color — white "
-                "is used.")
+                f"material '{name}' has a bad base color, "
+                "so white is used.")
             color = "#ffffff"
     texture_slots = ("baseColorTexture", "metallicRoughnessTexture",
                      "normalTexture", "occlusionTexture",
                      "emissiveTexture")
     if any(slot in pbr or slot in material for slot in texture_slots):
         warnings.append(
-            f"material '{name}' uses a texture — textures are not "
+            f"material '{name}' uses a texture. Textures are not "
             "imported, only the base color is used.")
     out = {"base_color": color}
     try:
@@ -414,8 +414,8 @@ def _material_for(gltf, index, warnings, mesh_name):
             pbr.get("roughnessFactor", 1.0))))
     except (TypeError, ValueError):
         warnings.append(
-            f"material '{name}' has a bad metalness or roughness — "
-            "the defaults are used.")
+            f"material '{name}' has a bad metalness or roughness, "
+            "so the defaults are used.")
         out["metalness"] = 1.0
         out["roughness"] = 1.0
     return out
@@ -439,7 +439,7 @@ def parse_glb(path):
             count = len(items)
             plural = "s" if count != 1 else ""
             warnings.append(
-                f"{count} {label}{plural} in the file were skipped — "
+                f"{count} {label}{plural} in the file were skipped. "
                 f"Reblend does not import {label}{plural} yet.")
     # Lights live in the KHR_lights_punctual extension in real files;
     # a top-level "lights" array is nonstandard but warned the same.
@@ -453,20 +453,20 @@ def parse_glb(path):
     if light_count:
         plural = "s" if light_count != 1 else ""
         warnings.append(
-            f"{light_count} light{plural} in the file were skipped — "
+            f"{light_count} light{plural} in the file were skipped. "
             "Reblend does not import lights yet.")
     if isinstance(gltf.get("textures"), list) and gltf["textures"]:
         count = len(gltf["textures"])
         plural = "s" if count != 1 else ""
         warnings.append(
-            f"{count} texture{plural} in the file were skipped — "
-            "only base colors are imported.")
+            f"{count} texture{plural} in the file were skipped. "
+            "Only base colors are imported.")
     if isinstance(gltf.get("images"), list) and gltf["images"] \
             and not gltf.get("textures"):
         count = len(gltf["images"])
         plural = "s" if count != 1 else ""
         warnings.append(
-            f"{count} image{plural} in the file were skipped — only "
+            f"{count} image{plural} in the file were skipped. Only "
             "base colors are imported.")
     world = _world_matrices(gltf, warnings)
     meshes = gltf.get("meshes") or []
@@ -481,13 +481,13 @@ def parse_glb(path):
                 or mesh_index >= len(meshes):
             warnings.append(
                 f"node '{node.get('name') or node_index}' refers to "
-                f"mesh {mesh_index}, which does not exist — it was "
+                f"mesh {mesh_index}, which does not exist, so it was "
                 "skipped.")
             continue
         mesh = meshes[mesh_index]
         if not isinstance(mesh, dict):
             warnings.append(
-                f"mesh {mesh_index} is not an object — it was skipped.")
+                f"mesh {mesh_index} is not an object, so it was skipped.")
             continue
         mesh_name = mesh.get("name") or node.get("name") or stem
         base_name = node.get("name") or mesh_name
@@ -496,19 +496,19 @@ def parse_glb(path):
             if not isinstance(prim, dict):
                 warnings.append(
                     f"mesh '{mesh_name}' has a primitive that is not "
-                    "an object — it was skipped.")
+                    "an object, so it was skipped.")
                 continue
             mode = prim.get("mode", 4)
             if mode != 4:
                 warnings.append(
                     f"mesh '{mesh_name}' has a primitive that is not "
-                    f"triangles (mode {mode}) — it was skipped.")
+                    f"triangles (mode {mode}), so it was skipped.")
                 continue
             attrs = prim.get("attributes") or {}
             if "POSITION" not in attrs:
                 warnings.append(
                     f"mesh '{mesh_name}' has a primitive with no "
-                    "positions — it was skipped.")
+                    "positions, so it was skipped.")
                 continue
             # Sparse accessors are valid glTF but unsupported here:
             # warn and skip the primitive before any of its data is
@@ -529,7 +529,7 @@ def parse_glb(path):
             if sparse:
                 warnings.append(
                     f"mesh '{mesh_name}' uses sparse accessors, which "
-                    "are not supported — it was skipped.")
+                    "are not supported, so it was skipped.")
                 continue
             what = f"positions of mesh '{mesh_name}'"
             positions, comp = _read_accessor(
@@ -587,7 +587,7 @@ def parse_glb(path):
                             "indices": indices, "material": material,
                             "matrix": matrix, "triangles": triangles})
     if not objects:
-        raise GlbError("no meshes found — there is nothing to import")
+        raise GlbError("no meshes found, so there is nothing to import")
     triangles = sum(o["triangles"] for o in objects)
     seen = set()
     unique_warnings = []
@@ -856,16 +856,16 @@ def _object_mesh(obj, base_path):
             os.path.join(base_path, mesh_file) if base_path else None)
         if path is None:
             return None, (f"Mesh file {mesh_file} cannot be found "
-                          f"without a saved scene — object '{name}' "
+                          f"without a saved scene, so object '{name}' "
                           "was skipped.")
         try:
             mesh = meshfile_mod.load_mesh(path)
         except FileNotFoundError:
-            return None, (f"Mesh file not found: {mesh_file} — object "
+            return None, (f"Mesh file not found: {mesh_file}, so object "
                           f"'{name}' was skipped.")
         except (OSError, ValueError) as exc:
             return None, (f"Mesh file could not be read: {mesh_file} "
-                          f"({exc}) — object '{name}' was skipped.")
+                          f"({exc}), so object '{name}' was skipped.")
         return {"positions": mesh["positions"], "normals": mesh["normals"],
                 "uvs": mesh["uvs"], "indices": mesh["indices"],
                 "tri_count": len(mesh["indices"]) // 3}, None

@@ -43,8 +43,8 @@ def parse(path):
     if ext == ".glb":
         return meshio_glb.parse_glb(path)
     raise ValueError(
-        f"'{os.path.basename(path)}' is not a supported mesh file — "
-        "try a .obj or .glb file")
+        f"'{os.path.basename(path)}' is not a supported mesh file. "
+        "Try a .obj or .glb file")
 
 
 def build(parsed, scale=DEFAULT_SCALE):

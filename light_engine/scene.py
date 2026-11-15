@@ -20,8 +20,25 @@ Scene JSON (format v2, T6):
                    "receive_shadow": true|false (default true, T5),
                    "material": { "base_color": "#rrggbb", "roughness": 0..1,
                                  "metalness": 0..1,
-                                 "texture": "none" | "wood_grain" |
-                                            "brushed_metal" | "worn_leather" } } ],
+                                 "style": "none" | a style key from
+                                        textures.STYLES (PO1 — the
+                                        procedural material library),
+                                 "texture": mirrors "style" (the
+                                        viewport reads this key; old
+                                        scenes store only "texture"
+                                        with a pre-PO1 name, mapped
+                                        at load — see
+                                        LEGACY_TEXTURE_MAP),
+                                 "params": { ... } (PO2 — the style's
+                                        knob values; overrides only,
+                                        so a missing key means the
+                                        style's default and an old
+                                        scene's {} renders exactly
+                                        as before),
+                                 "density": 1.0, "friction": 0.5,
+                                 "restitution": 0.3 (T19 — physics, see
+                                 Design 8; missing in old scenes,
+                                 defaults apply) } } ],
     "cameras": [ { "name", "position": [x, y, z], "look_at": [x, y, z] } ],
     "lights":  [ { "name", "kind": "key"|"fill"|"rim"|"ambient",
                    "position": [x, y, z], "color": "#rrggbb",
@@ -48,10 +65,62 @@ import os
 import uuid
 
 from .geometry import default_params
+from .textures import LEGACY_TEXTURE_MAP, STYLES
 
-TEXTURES = ("none", "wood_grain", "brushed_metal", "worn_leather")
+# Every texture value a material may carry: "none" plus every style
+# key in the PO1 library.
+TEXTURES = ("none",) + tuple(STYLES)
 MATERIAL_DEFAULTS = {"base_color": "#b0b0b0", "roughness": 0.6,
-                     "metalness": 0.0, "texture": "none"}
+                     "metalness": 0.0, "style": "none",
+                     "texture": "none", "params": {},
+                     "density": 1.0, "friction": 0.5,
+                     "restitution": 0.3}
+
+# Material physics presets (T19, Design 8): real-world-ish handbook
+# midpoints — friction and restitution are pair-dependent in reality,
+# so these are standard midpoints, not laboratory measurements. The
+# visual hint (roughness / metalness) is what "also set look" applies;
+# it is never written silently. The preset name is never stored — only
+# the three numbers are, so a scene file stays self-describing; the
+# picker derives the name from the numbers (material_preset_for).
+MATERIAL_PRESETS = {
+    "balsa_wood": {"display": "Balsa wood", "density": 0.16,
+                   "friction": 0.4, "restitution": 0.3,
+                   "roughness": 0.8, "metalness": 0.0},
+    "pine_wood": {"display": "Pine wood", "density": 0.5,
+                  "friction": 0.4, "restitution": 0.3,
+                  "roughness": 0.7, "metalness": 0.0},
+    "oak_wood": {"display": "Oak wood", "density": 0.75,
+                 "friction": 0.45, "restitution": 0.35,
+                 "roughness": 0.6, "metalness": 0.0},
+    "cork": {"display": "Cork", "density": 0.24, "friction": 0.5,
+             "restitution": 0.2, "roughness": 0.9, "metalness": 0.0},
+    "steel": {"display": "Steel", "density": 7.8, "friction": 0.3,
+              "restitution": 0.6, "roughness": 0.3, "metalness": 1.0},
+    "aluminium": {"display": "Aluminium", "density": 2.7,
+                  "friction": 0.35, "restitution": 0.4,
+                  "roughness": 0.4, "metalness": 1.0},
+    "copper": {"display": "Copper", "density": 9.0, "friction": 0.3,
+               "restitution": 0.5, "roughness": 0.25, "metalness": 1.0},
+    "gold": {"display": "Gold", "density": 19.3, "friction": 0.3,
+             "restitution": 0.4, "roughness": 0.15, "metalness": 1.0},
+    "stone": {"display": "Stone / concrete", "density": 2.4,
+              "friction": 0.7, "restitution": 0.1,
+              "roughness": 0.9, "metalness": 0.0},
+    "glass": {"display": "Glass", "density": 2.5, "friction": 0.2,
+              "restitution": 0.5, "roughness": 0.05, "metalness": 0.0},
+    "rubber": {"display": "Rubber", "density": 1.1, "friction": 0.9,
+               "restitution": 0.8, "roughness": 0.9, "metalness": 0.0},
+    "plastic": {"display": "Plastic", "density": 1.2, "friction": 0.4,
+                "restitution": 0.4, "roughness": 0.5, "metalness": 0.0},
+    "ice": {"display": "Ice", "density": 0.9, "friction": 0.05,
+            "restitution": 0.2, "roughness": 0.1, "metalness": 0.0},
+    "cloth": {"display": "Cloth", "density": 0.3, "friction": 0.6,
+              "restitution": 0.05, "roughness": 1.0, "metalness": 0.0},
+    "water": {"display": "Water (as a body)", "density": 1.0,
+              "friction": 0.1, "restitution": 0.0,
+              "roughness": 0.05, "metalness": 0.0},
+}
 
 # Emitter parameter set (T16, Design 5 revised). The emitter dict lives
 # on the object under "emitter" — the object's "params" stay the
@@ -245,16 +314,87 @@ def default_smooth_shading(shape):
     return shape in SMOOTH_SHAPES
 
 
+def _material_number(value, default, low=None, high=None):
+    """One material physics number, tolerant (T19): a missing or
+    malformed value (a string, None, a bool) falls back to the
+    default, never crashes. A real number is clamped to the given
+    range — density and friction have no upper bound (gold is 19.3,
+    friction runs 0 to 1 and past), restitution is 0 to 1."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    number = float(value)
+    if low is not None:
+        number = max(low, number)
+    if high is not None:
+        number = min(high, number)
+    return number
+
+
+def material_preset_for(mat):
+    """The preset whose three physics numbers match a material's
+    exactly, or "custom". The preset name is never stored (Design
+    8) — the picker derives it from the numbers every time, so a
+    hand-edit to exactly steel's numbers shows steel, and any other
+    edit shows custom."""
+    density = _material_number(mat.get("density"), 1.0, 0.0)
+    friction = _material_number(mat.get("friction"), 0.5, 0.0)
+    restitution = _material_number(mat.get("restitution"), 0.3, 0.0, 1.0)
+    for name, preset in MATERIAL_PRESETS.items():
+        if (preset["density"] == density
+                and preset["friction"] == friction
+                and preset["restitution"] == restitution):
+            return name
+    return "custom"
+
+
+def resolve_material_style(overrides):
+    """The style a material stores (PO1): the "style" key when it
+    names a real style (or "none"), else the legacy "texture" name
+    mapped through LEGACY_TEXTURE_MAP (old scenes store only
+    "texture"), else "none". Never raises, never returns an
+    unknown style."""
+    if overrides:
+        style = overrides.get("style")
+        if style in STYLES or style == "none":
+            return style
+        return LEGACY_TEXTURE_MAP.get(overrides.get("texture"), "none")
+    return "none"
+
+
 def default_material(overrides=None):
     mat = dict(MATERIAL_DEFAULTS)
     if overrides:
         for key in MATERIAL_DEFAULTS:
             if key in overrides:
                 mat[key] = overrides[key]
-    if mat["texture"] not in TEXTURES:
-        mat["texture"] = "none"
+    # "style" is canonical (PO1); "texture" mirrors it — the
+    # viewport reads "texture", so the two stay equal and no
+    # viewport change is needed. An old scene's "texture" name
+    # maps to its style here (see resolve_material_style).
+    mat["style"] = resolve_material_style(overrides)
+    mat["texture"] = mat["style"]
+    # "params" (PO2): the style's knob values, overrides only.
+    # Normalized to a fresh dict on every call — MATERIAL_DEFAULTS
+    # holds one shared {} and a shallow copy must never leak it
+    # into two materials. A missing or mistyped value is {}, and
+    # a non-number value is dropped (the merge in textures would
+    # ignore it anyway); unknown keys are kept, so a scene written
+    # by a newer Reblend keeps its values.
+    raw_params = mat.get("params")
+    if isinstance(raw_params, dict):
+        mat["params"] = {
+            key: float(value)
+            for key, value in raw_params.items()
+            if isinstance(value, (int, float))
+            and not isinstance(value, bool)}
+    else:
+        mat["params"] = {}
     mat["roughness"] = max(0.0, min(1.0, float(mat["roughness"])))
     mat["metalness"] = max(0.0, min(1.0, float(mat["metalness"])))
+    mat["density"] = _material_number(mat["density"], 1.0, 0.0)
+    mat["friction"] = _material_number(mat["friction"], 0.5, 0.0)
+    mat["restitution"] = _material_number(mat["restitution"], 0.3,
+                                          0.0, 1.0)
     return mat
 
 

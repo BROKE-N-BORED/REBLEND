@@ -505,3 +505,165 @@ def ray_vs_ring(origin, direction, center, axis, radius, thickness):
     if abs(radial - radius) <= thickness:
         return t
     return None
+
+
+# Gizmo geometry (T12/T13), moved here from viewport.py in F1:
+# every function below is pure (no GL, no Qt), so the headless
+# tests import it without PySide6. viewport.py imports these
+# names back — geometry.py is the single source.
+# Gizmo (T12): drawn with the lines program only, in unit space centred
+# on the selected object's position; the draw scales it by
+# gizmo_size(distance) so it stays the same size on screen. Axis colors
+# match the grid axes. Cones and cubes are wireframe outlines through
+# the lines program — T12 adds no solid-geometry pass.
+GIZMO_MODES = ("move", "rotate", "scale")
+GIZMO_AXIS_COLORS = {"x": (0.85, 0.25, 0.25),
+                     "y": (0.25, 0.75, 0.30),
+                     "z": (0.30, 0.45, 0.9)}
+# The gizmo's world-space size is distance * this factor. At the
+# 45-degree field of view the visible height at the target plane is
+# about 0.83 * distance, so 0.12 puts the gizmo at roughly 15% of the
+# viewport height whatever the zoom.
+GIZMO_SIZE_FACTOR = 0.12
+GIZMO_RING_SEGMENTS = 48
+GIZMO_CONE_SEGMENTS = 8
+# Handle extents in unit-gizmo space (T12 values, named in T13 so the
+# drawing and the picking share one source of truth — the builders
+# below and pick_gizmo both read these, so the pick can never drift
+# from what is drawn). Move: shaft to 0.75, cone base radius 0.09 at
+# 0.75, apex at 1.0. Rotate: ring radius 1.0. Scale: line to 0.7,
+# cube centred at 0.81 with half-side 0.11.
+GIZMO_MOVE_SHAFT_END = 0.75
+GIZMO_MOVE_TIP = 1.0
+GIZMO_CONE_BASE_RADIUS = 0.09
+GIZMO_RING_RADIUS = 1.0
+GIZMO_SCALE_LINE_END = 0.7
+GIZMO_SCALE_CUBE_CENTER = 0.81
+GIZMO_SCALE_CUBE_HALF = 0.11
+# Pick tolerance in unit-gizmo space (T13): the drawn lines have no
+# width, so the pick tests fatten each handle by this much — about
+# 11 screen pixels at the tavern view, a grabbable handle without
+# swallowing the scene around it.
+GIZMO_PICK_TOLERANCE = 0.12
+# Shift-snap steps (T13): move 10 cm, rotate 15 degrees, scale 0.1.
+GIZMO_SNAP_MOVE = 10.0
+GIZMO_SNAP_ROTATE = 15.0
+GIZMO_SNAP_SCALE = 0.1
+# A scale drag never takes an axis below this: 0 would collapse the
+# object and a negative would flip it inside out. The inspector still
+# accepts any value typed in — this clamp is drag-only.
+GIZMO_MIN_SCALE = 0.01
+
+
+def gizmo_size(distance):
+    """World-space gizmo size for a camera distance (T12): the gizmo
+    grows with distance so it keeps the same size on screen."""
+    return float(distance) * GIZMO_SIZE_FACTOR
+
+
+def _gizmo_axis_frame(axis):
+    """(unit, perp1, perp2) for an axis: the axis direction and two
+    perpendicular unit vectors, right-handed."""
+    frames = {"x": ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+              "y": ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)),
+              "z": ((0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0))}
+    return frames[axis]
+
+
+def _gizmo_add(verts, a, b, color):
+    verts += [a[0], a[1], a[2], *color, b[0], b[1], b[2], *color]
+
+
+def _gizmo_bright(color):
+    """The hover highlight for an axis color (T13): each channel moved
+    55% toward white, so the hovered handle reads brighter without
+    changing hue."""
+    return tuple(c + (1.0 - c) * 0.55 for c in color)
+
+
+def _gizmo_move_axis(verts, axis, color):
+    """One move arrow: a shaft from the origin to 0.75, then a cone
+    outline — an 8-segment base circle of radius 0.09 at 0.75 and
+    four side lines to the apex at 1.0."""
+    u, p, q = _gizmo_axis_frame(axis)
+    tip = tuple(GIZMO_MOVE_SHAFT_END * v for v in u)
+    _gizmo_add(verts, (0.0, 0.0, 0.0), tip, color)
+    base = []
+    for i in range(GIZMO_CONE_SEGMENTS):
+        angle = 2.0 * math.pi * i / GIZMO_CONE_SEGMENTS
+        base.append(tuple(tip[j] + GIZMO_CONE_BASE_RADIUS
+                          * (math.cos(angle) * p[j]
+                             + math.sin(angle) * q[j])
+                          for j in range(3)))
+    for i in range(GIZMO_CONE_SEGMENTS):
+        _gizmo_add(verts, base[i], base[(i + 1) % GIZMO_CONE_SEGMENTS],
+                   color)
+    apex = tuple(GIZMO_MOVE_TIP * v for v in u)
+    for i in range(0, GIZMO_CONE_SEGMENTS, 2):
+        _gizmo_add(verts, base[i], apex, color)
+
+
+def _gizmo_rotate_axis(verts, axis, color):
+    """One rotate ring: a 48-segment circle of radius 1.0 in the
+    plane perpendicular to the axis."""
+    _u, p, q = _gizmo_axis_frame(axis)
+    ring = []
+    for i in range(GIZMO_RING_SEGMENTS):
+        angle = 2.0 * math.pi * i / GIZMO_RING_SEGMENTS
+        ring.append(tuple(GIZMO_RING_RADIUS
+                          * (math.cos(angle) * p[j]
+                             + math.sin(angle) * q[j])
+                          for j in range(3)))
+    for i in range(GIZMO_RING_SEGMENTS):
+        _gizmo_add(verts, ring[i], ring[(i + 1) % GIZMO_RING_SEGMENTS],
+                   color)
+
+
+def _gizmo_scale_axis(verts, axis, color):
+    """One scale handle: a short line from the origin to 0.7, ending
+    in a small cube outline (side 0.22) centred at 0.81 along the
+    axis."""
+    u, p, q = _gizmo_axis_frame(axis)
+    end = tuple(GIZMO_SCALE_LINE_END * v for v in u)
+    _gizmo_add(verts, (0.0, 0.0, 0.0), end, color)
+    centre = tuple(GIZMO_SCALE_CUBE_CENTER * v for v in u)
+    half = GIZMO_SCALE_CUBE_HALF
+    corners = []
+    for su in (-1.0, 1.0):
+        for sp in (-1.0, 1.0):
+            for sq in (-1.0, 1.0):
+                corners.append(tuple(
+                    centre[j] + half * (su * u[j] + sp * p[j] + sq * q[j])
+                    for j in range(3)))
+    # Corner order is (su, sp, sq) with each sign varying slowest to
+    # fastest; the edges join corners differing in exactly one sign.
+    edges = [(0, 1), (2, 3), (4, 5), (6, 7), (0, 2), (1, 3), (4, 6),
+             (5, 7), (0, 4), (1, 5), (2, 6), (3, 7)]
+    for a, b in edges:
+        _gizmo_add(verts, corners[a], corners[b], color)
+
+
+def gizmo_lines(mode, highlight=None):
+    """Interleaved pos(3)+color(3) floats for one gizmo mode, in unit
+    space centred on the origin (T12). The draw scales the unit gizmo
+    by gizmo_size(distance) and translates it to the selected
+    object's position. Raises ValueError on an unknown mode.
+    highlight (T13) is None or one axis ("x", "y", "z"): that axis's
+    lines come out in the bright hover color, the others unchanged."""
+    builders = {"move": _gizmo_move_axis,
+                "rotate": _gizmo_rotate_axis,
+                "scale": _gizmo_scale_axis}
+    build = builders.get(mode)
+    if build is None:
+        raise ValueError(f"unknown gizmo mode: {mode!r} "
+                         f"(expected one of {', '.join(GIZMO_MODES)})")
+    if highlight is not None and highlight not in ("x", "y", "z"):
+        raise ValueError(f"unknown gizmo highlight: {highlight!r} "
+                         "(expected None or one of 'x', 'y', 'z')")
+    verts = []
+    for axis in ("x", "y", "z"):
+        color = GIZMO_AXIS_COLORS[axis]
+        if axis == highlight:
+            color = _gizmo_bright(color)
+        build(verts, axis, color)
+    return verts

@@ -70,8 +70,8 @@ def _parse_mtllib(path, warnings):
             lines = fh.readlines()
     except OSError:
         warnings.append(
-            f"Material file not found: {os.path.basename(path)} — "
-            "objects use the default color.")
+            f"Material file not found: {os.path.basename(path)}. "
+            "Objects use the default color.")
         return materials
     current = None
     for line in lines:
@@ -86,8 +86,8 @@ def _parse_mtllib(path, warnings):
                 materials[current] = _rgb_to_hex(parts[1], parts[2], parts[3])
             except ValueError:
                 warnings.append(
-                    f"Material '{current}' has a bad diffuse color — "
-                    "the default color is used.")
+                    f"Material '{current}' has a bad diffuse color, "
+                    "so the default color is used.")
                 materials[current] = DEFAULT_COLOR
     return materials
 
@@ -219,7 +219,7 @@ def parse_obj(path):
         # never fatal.
     objects = [g for g in groups if g["faces"]]
     if not objects:
-        raise ObjError("no faces found — there is nothing to import")
+        raise ObjError("no faces found, so there is nothing to import")
     triangles = sum(len(g["faces"]) for g in objects)
     # De-duplicate warnings, keeping first-seen order: a file with
     # fifty multi-material groups warns once per group name, and the
@@ -381,16 +381,16 @@ def _object_soup(obj, base_path):
             os.path.join(base_path, mesh_file) if base_path else None)
         if path is None:
             return None, (f"Mesh file {mesh_file} cannot be found "
-                          f"without a saved scene — object '{name}' "
+                          f"without a saved scene, so object '{name}' "
                           "was skipped.")
         try:
             mesh = meshfile_mod.load_mesh(path)
         except FileNotFoundError:
-            return None, (f"Mesh file not found: {mesh_file} — object "
+            return None, (f"Mesh file not found: {mesh_file}, so object "
                           f"'{name}' was skipped.")
         except (OSError, ValueError) as exc:
             return None, (f"Mesh file could not be read: {mesh_file} "
-                          f"({exc}) — object '{name}' was skipped.")
+                          f"({exc}), so object '{name}' was skipped.")
         return _deindex(mesh), None
     smooth = obj.get("smooth_shading",
                      obj.get("shape") in _SMOOTH_SHAPES)

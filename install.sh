@@ -49,10 +49,22 @@ if [ ! -d ".venv" ]; then
   python3 -m venv .venv
 fi
 
-echo "Installing PySide6_Essentials (this downloads once)..."
+echo "Installing PySide6_Essentials 6.12.0 (this downloads once)..."
 .venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install PySide6_Essentials
+.venv/bin/python -m pip install PySide6_Essentials==6.12.0
 
 echo "Checking the install..."
-.venv/bin/python -m unittest discover -s tests -v 2>&1 | tail -3
-echo "Done. Run it with:  bash run.sh"
+# The suite's exit code gates the install: it used to run through
+# `tail -3`, whose exit status is always 0, so a red suite still
+# printed Done. Output goes to a log (inside .venv, never committed);
+# on failure the last lines print so the failure is visible.
+if .venv/bin/python -m unittest discover -s tests -v > .venv/test-output.log 2>&1; then
+  tail -3 .venv/test-output.log
+  echo "Done. Run it with:  bash run.sh"
+else
+  echo "The self-check failed, so the install did not finish cleanly."
+  echo "Reblend is installed, but its tests did not all pass:"
+  tail -20 .venv/test-output.log
+  echo "Full output is in .venv/test-output.log"
+  exit 1
+fi

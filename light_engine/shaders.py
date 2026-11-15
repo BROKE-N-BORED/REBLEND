@@ -15,9 +15,11 @@ Four programs, all GLSL 330:
   garbage in the shadow pass.
 - ``lines``: color-only program for the grid, axes, and selection box
   (and the gizmo, in a later task).
-- ``points``: point sprites with size attenuation. Written here so the
-  program set is complete; nothing draws points until the particle
-  task (T16/T17) uses it.
+- ``points``: point sprites with size attenuation and a per-particle
+  alpha attribute (T17, location 3) for opacity over life. The
+  viewport draws live particles with it: one merged VBO, two draw
+  calls by blend mode (alpha for smoke/dust/snow, additive for
+  fire/sparks).
 
 The sources are plain module constants so they can be inspected and
 tested without Qt. Compiling needs a current GL context; the compile
@@ -268,17 +270,24 @@ void main() {
 # -- points ---------------------------------------------------------------
 # Point sprites with size attenuation: aSize is the world-space size,
 # uPointScale is viewport_height / (2 * tan(fov / 2)) at draw time.
+# aAlpha (location 3, T17) is the per-particle opacity from the sim's
+# fade in/out over life; the fragment shader multiplies it by the
+# soft-circle falloff, so a particle fades both at its edge and over
+# its life. The viewport draws the two blend modes (alpha, additive)
+# as two draw calls from the one merged VBO.
 
 POINTS_VERT = """#version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aColor;
 layout(location = 2) in float aSize;
+layout(location = 3) in float aAlpha;
 
 uniform mat4 uView;
 uniform mat4 uProj;
 uniform float uPointScale;
 
 out vec3 vColor;
+out float vAlpha;
 
 void main() {
     vec4 eyePos = uView * vec4(aPos, 1.0);
@@ -286,11 +295,13 @@ void main() {
     float dist = max(1.0, -eyePos.z);
     gl_PointSize = aSize * uPointScale / dist;
     vColor = aColor;
+    vAlpha = aAlpha;
 }
 """
 
 POINTS_FRAG = """#version 330 core
 in vec3 vColor;
+in float vAlpha;
 
 out vec4 FragColor;
 
@@ -300,7 +311,7 @@ void main() {
     if (r > 0.5) {
         discard;
     }
-    float alpha = smoothstep(0.5, 0.2, r);
+    float alpha = smoothstep(0.5, 0.2, r) * vAlpha;
     FragColor = vec4(vColor, alpha);
 }
 """
