@@ -89,6 +89,19 @@ FIELD_HELP = {
     "param_clump_size": "How wide the clumps are, in centimeters.",
     "param_ripple_spacing": "How far apart the ripples are, in "
                             "centimeters.",
+    # Layout rows (PO4): one line for the picker, one per size
+    # label in LAYOUT_UI below. Same rules as the rest: plain
+    # words, ends with a period, no em-dash, no bare "&".
+    "layout": "How the pieces are arranged. Solid leaves the "
+              "pattern as it is.",
+    "layout_board_width": "How wide each board is, in centimeters.",
+    "layout_board_length": "How long each board is, in centimeters.",
+    "layout_strip_width": "How wide each strip is, in centimeters.",
+    "layout_block_size": "How wide each block of strips is, in "
+                         "centimeters.",
+    "layout_square_size": "How wide each square is, in centimeters.",
+    "layout_slab_width": "How wide each slab is, in centimeters.",
+    "layout_slab_length": "How long each slab is, in centimeters.",
 }
 
 
@@ -295,14 +308,96 @@ def param_knobs_for(style, advanced):
     knob without a "simple" flag counts as simple, so a new knob
     shows instead of vanishing — but the suite pins every knob
     carrying the flag explicitly, so that default is a backstop,
-    not a way to skip the choice. PO4's layout rows and PO5's
-    wear rows are Advanced-only too, but they are not param
-    knobs — they slot into the same container in window.py,
-    under the same toggle, when their tasks land."""
+    not a way to skip the choice. PO4's layout rows are
+    Advanced-only too, but they are not param knobs — they slot
+    into the same container in window.py, under the same toggle
+    (see layout_rows_for); PO5's wear rows will follow the same
+    pattern when that task lands."""
     knobs = PARAM_UI.get(style, ())
     if advanced:
         return knobs
     return tuple(k for k in knobs if k.get("simple", True))
+
+
+# Layout size rows (PO4): for each layout that has sizes, the rows
+# the Material section shows under the layout picker, in order.
+# Each row: the layout_size key it edits ("board_width" or
+# "board_length" — the keys are shared across layouts, the labels
+# are per-layout), its plain-words label, the spin range + step +
+# decimals, and its FIELD_HELP key. The picker relabels the same
+# two keys per layout (parquet's length is its block size, a
+# slab's width and length are the slab's sides), so sizes persist
+# across layout switches. Solid and the brick bonds have no entry:
+# solid has no pieces, and brick sizes itself from the brick
+# length / course height knobs. Ranges keep the pieces drawable:
+# the narrowest strip (3 cm) is still several pixels wide on a
+# 1 m face, and the longest board (120 cm) still shows joints on
+# a big floor. Defaults (textures.LAYOUT_DEFAULTS) sit inside
+# every range — the suite pins that.
+LAYOUT_UI = {
+    "boards": (
+        {"key": "board_width", "label": "Board width",
+         "low": 5.0, "high": 25.0, "step": 0.5, "decimals": 1,
+         "help": "layout_board_width"},
+        {"key": "board_length", "label": "Board length",
+         "low": 30.0, "high": 120.0, "step": 1.0, "decimals": 0,
+         "help": "layout_board_length"},
+    ),
+    "strip": (
+        {"key": "board_width", "label": "Strip width",
+         "low": 3.0, "high": 12.0, "step": 0.5, "decimals": 1,
+         "help": "layout_strip_width"},
+        {"key": "board_length", "label": "Board length",
+         "low": 30.0, "high": 120.0, "step": 1.0, "decimals": 0,
+         "help": "layout_board_length"},
+    ),
+    "parquet": (
+        {"key": "board_width", "label": "Strip width",
+         "low": 4.0, "high": 15.0, "step": 0.5, "decimals": 1,
+         "help": "layout_strip_width"},
+        {"key": "board_length", "label": "Block size",
+         "low": 20.0, "high": 60.0, "step": 1.0, "decimals": 0,
+         "help": "layout_block_size"},
+    ),
+    "chevron": (
+        {"key": "board_width", "label": "Board width",
+         "low": 5.0, "high": 25.0, "step": 0.5, "decimals": 1,
+         "help": "layout_board_width"},
+        {"key": "board_length", "label": "Board length",
+         "low": 30.0, "high": 120.0, "step": 1.0, "decimals": 0,
+         "help": "layout_board_length"},
+    ),
+    "herringbone": (
+        {"key": "board_width", "label": "Board width",
+         "low": 5.0, "high": 25.0, "step": 0.5, "decimals": 1,
+         "help": "layout_board_width"},
+        {"key": "board_length", "label": "Board length",
+         "low": 30.0, "high": 120.0, "step": 1.0, "decimals": 0,
+         "help": "layout_board_length"},
+    ),
+    "basket_weave": (
+        {"key": "board_width", "label": "Board width",
+         "low": 5.0, "high": 20.0, "step": 0.5, "decimals": 1,
+         "help": "layout_board_width"},
+        {"key": "board_length", "label": "Square size",
+         "low": 20.0, "high": 60.0, "step": 1.0, "decimals": 0,
+         "help": "layout_square_size"},
+    ),
+    "slab": (
+        {"key": "board_width", "label": "Slab width",
+         "low": 20.0, "high": 120.0, "step": 1.0, "decimals": 0,
+         "help": "layout_slab_width"},
+        {"key": "board_length", "label": "Slab length",
+         "low": 20.0, "high": 120.0, "step": 1.0, "decimals": 0,
+         "help": "layout_slab_length"},
+    ),
+}
+
+
+def layout_rows_for(layout):
+    """The size rows the Material section shows for a layout (PO4):
+    the LAYOUT_UI entry, or no rows for solid and the brick bonds."""
+    return LAYOUT_UI.get(layout, ())
 
 
 def _physics_enabled(obj):

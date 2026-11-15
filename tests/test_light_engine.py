@@ -792,6 +792,336 @@ class MaterialParamsTests(unittest.TestCase):
         self.assertEqual(base, ignored)
 
 
+class MaterialLayoutsTests(unittest.TestCase):
+    """PO4, headless: layouts + real-world sizes — the registry,
+    the resolve/merge rules, tolerant load, round-trip, the
+    brick bonds, and the staircase lattice tiling exactly."""
+
+    def test_layout_registry_coverage(self):
+        # Every style's layouts are in the vocabulary, and every
+        # layout is used by at least one style — a layout no
+        # style takes is dead data.
+        used = set()
+        for style, entry in textures.STYLES.items():
+            self.assertTrue(entry["layouts"], style)
+            self.assertLessEqual(set(entry["layouts"]),
+                                 set(textures.LAYOUTS), style)
+            used.update(entry["layouts"])
+        self.assertEqual(used, set(textures.LAYOUTS))
+        # The display names and the shader modes cover every
+        # layout exactly once.
+        self.assertEqual(set(textures.LAYOUT_DISPLAY),
+                         set(textures.LAYOUTS))
+        self.assertEqual(set(textures.LAYOUT_SHADER_MODES),
+                         set(textures.LAYOUTS))
+        for name in textures.LAYOUT_DISPLAY.values():
+            self.assertNotIn("\u2014", name)
+            self.assertNotIn("&", name)
+        # Solid-only styles (the picker hides for them) are the
+        # metals, fabrics, and grounds; everything else takes a
+        # choice.
+        solid_only = {s for s, e in textures.STYLES.items()
+                      if e["layouts"] == ("solid",)}
+        self.assertEqual(solid_only,
+                         {"metal_brushed", "metal_rusted",
+                          "metal_galvanised", "fabric_canvas",
+                          "fabric_wool_loop", "fabric_leather",
+                          "ground_lawn", "ground_soil",
+                          "ground_sand"})
+
+    def test_default_and_resolve_layout(self):
+        self.assertEqual(textures.default_layout("wood_cathedral"),
+                         "solid")
+        # Brick takes no solid: its default is its first layout.
+        self.assertEqual(textures.default_layout("brick_stretcher"),
+                         "stretcher")
+        self.assertEqual(textures.default_layout("none"), "solid")
+        self.assertEqual(textures.default_layout("bogus"), "solid")
+        # A valid layout passes through; anything else resolves
+        # to the style's default, never raising.
+        self.assertEqual(textures.resolve_layout(
+            "wood_cathedral", "herringbone"), "herringbone")
+        self.assertEqual(textures.resolve_layout(
+            "wood_cathedral", "flemish"), "solid")
+        self.assertEqual(textures.resolve_layout(
+            "wood_cathedral", None), "solid")
+        self.assertEqual(textures.resolve_layout(
+            "wood_cathedral", "bogus"), "solid")
+        self.assertEqual(textures.resolve_layout(
+            "brick_stretcher", "solid"), "stretcher")
+        self.assertEqual(textures.resolve_layout(
+            "brick_stretcher", "basket_weave"), "basket_weave")
+        self.assertEqual(textures.resolve_layout("bogus", "boards"),
+                         "solid")
+        self.assertEqual(textures.layouts_for_style("bogus"),
+                         ["solid"])
+
+    def test_merged_layout_size(self):
+        # Defaults, per layout.
+        self.assertEqual(textures.merged_layout_size("boards"),
+                         (12.0, 90.0))
+        self.assertEqual(textures.merged_layout_size("herringbone"),
+                         (9.0, 54.0))
+        self.assertEqual(textures.merged_layout_size("slab"),
+                         (60.0, 60.0))
+        # Overrides merge over the defaults, per key.
+        self.assertEqual(textures.merged_layout_size(
+            "boards", {"board_width": 9.0}), (9.0, 90.0))
+        self.assertEqual(textures.merged_layout_size(
+            "boards", {"board_length": 54.0}), (12.0, 54.0))
+        # Unknown keys, non-numbers, bools, and sizes at or below
+        # zero fall back to the default — a render must never
+        # divide by a stored zero.
+        self.assertEqual(textures.merged_layout_size(
+            "boards", {"board_width": 0, "board_length": -5.0}),
+            (12.0, 90.0))
+        self.assertEqual(textures.merged_layout_size(
+            "boards", {"board_width": "wide", "bogus": 1.0}),
+            (12.0, 90.0))
+        self.assertEqual(textures.merged_layout_size("boards", "wide"),
+                         (12.0, 90.0))
+        # Layouts without sizes return (0.0, 0.0).
+        self.assertEqual(textures.merged_layout_size("solid"),
+                         (0.0, 0.0))
+        self.assertEqual(textures.merged_layout_size("stretcher"),
+                         (0.0, 0.0))
+        self.assertEqual(textures.merged_layout_size("bogus"),
+                         (0.0, 0.0))
+
+    def test_layout_shader_modes(self):
+        # The mode table: solid 0, boards/strip 1, parquet/
+        # basket 2, chevron 3, herringbone 4, slab 5, brick
+        # bonds 6. The mode resolves first, so an invalid layout
+        # for the style yields the default's mode.
+        self.assertEqual(textures.layout_shader_mode(
+            "wood_cathedral", "solid"), 0)
+        self.assertEqual(textures.layout_shader_mode(
+            "wood_cathedral", "boards"), 1)
+        self.assertEqual(textures.layout_shader_mode(
+            "wood_cathedral", "strip"), 1)
+        self.assertEqual(textures.layout_shader_mode(
+            "wood_cathedral", "parquet"), 2)
+        self.assertEqual(textures.layout_shader_mode(
+            "wood_cathedral", "chevron"), 3)
+        self.assertEqual(textures.layout_shader_mode(
+            "wood_cathedral", "herringbone"), 4)
+        self.assertEqual(textures.layout_shader_mode(
+            "stone_granite", "slab"), 5)
+        self.assertEqual(textures.layout_shader_mode(
+            "brick_stretcher", "flemish"), 6)
+        self.assertEqual(textures.layout_shader_mode(
+            "brick_stretcher", "basket_weave"), 2)
+        self.assertEqual(textures.layout_shader_mode(
+            "brick_stretcher", "herringbone"), 4)
+        self.assertEqual(textures.layout_shader_mode(
+            "metal_brushed", "herringbone"), 0)
+        self.assertEqual(textures.layout_shader_mode(
+            "metal_brushed", "bogus"), 0)
+
+    def test_layout_affects_bake(self):
+        # Only brick's layout changes the baked tile; every other
+        # style lays out in the shader.
+        self.assertTrue(textures.layout_affects_bake("brick_stretcher"))
+        for style in textures.STYLES:
+            if style != "brick_stretcher":
+                self.assertFalse(
+                    textures.layout_affects_bake(style), style)
+        self.assertFalse(textures.layout_affects_bake("none"))
+
+    def test_default_material_layout_tolerant(self):
+        # Missing: the style's default (old scenes carry no
+        # layout key).
+        mat = scene_mod.default_material({})
+        self.assertEqual(mat["layout"], "solid")
+        self.assertEqual(mat["layout_size"], {})
+        mat = scene_mod.default_material({"style": "brick_stretcher"})
+        self.assertEqual(mat["layout"], "stretcher")
+        # A layout from another style resolves to the default.
+        mat = scene_mod.default_material(
+            {"style": "wood_cathedral", "layout": "flemish"})
+        self.assertEqual(mat["layout"], "solid")
+        mat = scene_mod.default_material(
+            {"style": "brick_stretcher", "layout": "solid"})
+        self.assertEqual(mat["layout"], "stretcher")
+        # Mistyped: the default, never a crash.
+        mat = scene_mod.default_material(
+            {"style": "wood_cathedral", "layout": 42})
+        self.assertEqual(mat["layout"], "solid")
+        # Sizes: numbers kept as floats, non-numbers dropped,
+        # unknown keys kept (a newer Reblend may use them).
+        mat = scene_mod.default_material(
+            {"layout_size": {"board_width": 9, "bad": "wide",
+                             "bool": True, "none": None,
+                             "future": 1.5}})
+        self.assertEqual(mat["layout_size"],
+                         {"board_width": 9.0, "future": 1.5})
+        mat = scene_mod.default_material({"layout_size": "wide"})
+        self.assertEqual(mat["layout_size"], {})
+        # Every call gets a fresh dict: MATERIAL_DEFAULTS holds
+        # one shared {} and a shallow copy must never leak it
+        # into two materials.
+        first = scene_mod.default_material()
+        second = scene_mod.default_material()
+        self.assertIsNot(first["layout_size"], second["layout_size"])
+        first["layout_size"]["board_width"] = 9.0
+        self.assertEqual(second["layout_size"], {})
+
+    def test_layout_round_trips_through_save_load(self):
+        scene = scene_mod.new_scene("layouts")
+        obj = scene_mod.new_object(
+            "box", material={"style": "wood_cathedral",
+                             "layout": "herringbone",
+                             "layout_size": {"board_width": 9.0,
+                                             "board_length": 54.0}})
+        scene["objects"].append(obj)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "scene.json")
+            scene_mod.save_scene(scene, path)
+            loaded = scene_mod.load_scene(path)
+        mat = loaded["objects"][0]["material"]
+        self.assertEqual(mat["style"], "wood_cathedral")
+        self.assertEqual(mat["layout"], "herringbone")
+        self.assertEqual(mat["layout_size"], {"board_width": 9.0,
+                                              "board_length": 54.0})
+
+    def test_old_scene_loads_with_default_layouts(self):
+        # The tavern file carries no layout key anywhere: every
+        # material loads with its style's default and empty
+        # sizes — and renders exactly as before PO4.
+        scene = scene_mod.load_scene(str(EXAMPLE))
+        for obj in scene["objects"]:
+            mat = obj["material"]
+            self.assertEqual(
+                mat["layout"],
+                textures.default_layout(mat["style"]), obj["name"])
+            self.assertEqual(mat["layout_size"], {}, obj["name"])
+
+    def test_brick_bonds(self):
+        points = [(u / 40.0, v / 40.0) for u in range(41)
+                  for v in range(41)]
+        # Stretcher, implicit and explicit, is the PO1 path —
+        # the no-layout bake is unchanged.
+        base = [textures.pattern_factor("brick_stretcher", u, v)
+                for u, v in points]
+        explicit = [textures.pattern_factor(
+            "brick_stretcher", u, v, layout="stretcher")
+            for u, v in points]
+        self.assertEqual(base, explicit)
+        # Every other bond differs from stretcher at many points,
+        # and from each other — and stays in the sane range.
+        grids = {}
+        for bond in ("flemish", "english", "basket_weave",
+                     "herringbone"):
+            grid = [textures.pattern_factor(
+                "brick_stretcher", u, v, layout=bond)
+                for u, v in points]
+            self.assertTrue(all(0.6 <= f <= 1.15 for f in grid), bond)
+            diff = sum(1 for a, b in zip(base, grid) if a != b)
+            self.assertGreater(diff, 100, bond)
+            grids[bond] = grid
+        bonds = sorted(grids)
+        for i, first in enumerate(bonds):
+            for second in bonds[i + 1:]:
+                diff = sum(1 for a, b in zip(grids[first], grids[second])
+                           if a != b)
+                self.assertGreater(diff, 100, (first, second))
+        # An unknown bond falls back to stretcher, and a layout
+        # on a non-brick style never touches its bake.
+        unknown = [textures.pattern_factor(
+            "brick_stretcher", u, v, layout="bogus")
+            for u, v in points]
+        self.assertEqual(base, unknown)
+        wood = [textures.pattern_factor("wood_cathedral", u, v)
+                for u, v in points]
+        wood_laid = [textures.pattern_factor(
+            "wood_cathedral", u, v, layout="herringbone")
+            for u, v in points]
+        self.assertEqual(wood, wood_laid)
+
+    def test_staircase_tiles_exactly(self):
+        # The herringbone lattice tiles the plane with no gaps
+        # and no overlaps: every point on a dense grid — plain
+        # grid points (which land on piece edges) and offset
+        # ones — is in exactly one piece, and the returned piece
+        # contains the point at the returned local position.
+        # Two ratios: the 6:1 classic and a non-divisible one.
+        for L, w in ((54.0, 9.0), (50.0, 7.0)):
+            step = 2.0
+            count = 0
+            x = -L
+            while x <= 3 * L:
+                y = -L
+                while y <= 3 * L:
+                    for dx, dy in ((0.0, 0.0), (0.37, 0.61)):
+                        px, py = x + dx, y + dy
+                        piece = textures._staircase_piece(px, py, L, w)
+                        self.assertIsNotNone(piece, (px, py, L, w))
+                        kind, lx, ly, i, j = piece
+                        if kind == "H":
+                            self.assertGreaterEqual(lx, 0.0)
+                            self.assertLess(lx, L)
+                            self.assertGreaterEqual(ly, 0.0)
+                            self.assertLess(ly, w)
+                            cx, cy = i * L + j * w, i * L - j * w
+                        else:
+                            self.assertGreaterEqual(lx, 0.0)
+                            self.assertLess(lx, w)
+                            self.assertGreaterEqual(ly, 0.0)
+                            self.assertLess(ly, L)
+                            cx = i * L + j * w + L
+                            cy = i * L - j * w
+                        self.assertAlmostEqual(cx + lx, px, places=6)
+                        self.assertAlmostEqual(cy + ly, py, places=6)
+                        count += 1
+                    y += step
+                x += step
+            self.assertGreater(count, 10000, (L, w))
+        # Exact points: the origin is the corner of the first
+        # horizontal piece, (L, 0) the corner of the first
+        # vertical one.
+        self.assertEqual(
+            textures._staircase_piece(0.0, 0.0, 54.0, 9.0),
+            ("H", 0.0, 0.0, 0, 0))
+        self.assertEqual(
+            textures._staircase_piece(54.0, 0.0, 54.0, 9.0),
+            ("V", 0.0, 0.0, 0, 0))
+        self.assertEqual(
+            textures._staircase_piece(27.0, 4.5, 54.0, 9.0),
+            ("H", 27.0, 4.5, 0, 0))
+
+    def test_layout_ui_covers_sized_layouts(self):
+        from light_engine import inspector_data as inspector_mod
+        # The size rows cover exactly the layouts with sizes:
+        # solid and the brick bonds have none.
+        self.assertEqual(set(inspector_mod.LAYOUT_UI),
+                         set(textures.LAYOUT_DEFAULTS))
+        self.assertEqual(inspector_mod.layout_rows_for("solid"), ())
+        self.assertEqual(inspector_mod.layout_rows_for("stretcher"),
+                         ())
+        self.assertEqual(inspector_mod.layout_rows_for("bogus"), ())
+        for layout, rows in inspector_mod.LAYOUT_UI.items():
+            self.assertEqual([r["key"] for r in rows],
+                             ["board_width", "board_length"], layout)
+            for row in rows:
+                self.assertEqual(set(row),
+                                 {"key", "label", "low", "high",
+                                  "step", "decimals", "help"}, row)
+                self.assertLess(row["low"], row["high"], row)
+                self.assertGreater(row["step"], 0, row)
+                self.assertIn(row["help"], inspector_mod.FIELD_HELP,
+                              row)
+                self.assertNotIn("\u2014", row["label"], row)
+                self.assertNotIn("&", row["label"], row)
+                # The layout's default displays inside the row's
+                # range — a default the spin cannot show would
+                # be clamped away on the first sync.
+                defaults = textures.LAYOUT_DEFAULTS[layout]
+                default = defaults[0] if row["key"] == "board_width" \
+                    else defaults[1]
+                self.assertGreaterEqual(default, row["low"], row)
+                self.assertLessEqual(default, row["high"], row)
+
+
 class FileIOTests(unittest.TestCase):
     def test_example_scene_loads_and_is_light(self):
         self.assertTrue(EXAMPLE.exists(), "example scene missing")
@@ -2390,7 +2720,13 @@ class GlbImportTests(unittest.TestCase):
         self.assertEqual(report["warnings"], [])
         by_name = {o["name"]: o for o in objects}
         crate = by_name["Crate"]
-        self.assertEqual(crate["material"]["base_color"], "#cc3326")
+        # The sample's factors are read as LINEAR light per the glTF
+        # spec and converted to sRGB hex: [0.8, 0.2, 0.15] is
+        # #e77c6c, not the #cc3326 the old sRGB-straight-across read
+        # produced. (The sample file itself was authored with
+        # sRGB-looking factors; the file is unchanged, the reading
+        # is now correct.)
+        self.assertEqual(crate["material"]["base_color"], "#e77c6c")
         self.assertEqual(crate["material"]["metalness"], 0.0)
         self.assertEqual(crate["material"]["roughness"], 0.8)
         self.assertEqual(crate["position"], [-80.0, -50.0, 50.0])
@@ -2400,7 +2736,7 @@ class GlbImportTests(unittest.TestCase):
         self.assertEqual(len(crate["mesh"]["indices"]) // 3, 12)
         self.assertEqual(len(crate["mesh"]["positions"]) // 3, 24)
         pyramid = by_name["Pyramid"]
-        self.assertEqual(pyramid["material"]["base_color"], "#1a998c")
+        self.assertEqual(pyramid["material"]["base_color"], "#59cbc4")
         self.assertEqual(pyramid["material"]["metalness"], 0.1)
         self.assertEqual(pyramid["material"]["roughness"], 0.4)
         self.assertEqual(pyramid["position"], [90.0, 0.0, 0.0])
@@ -2570,9 +2906,11 @@ class GlbImportTests(unittest.TestCase):
         self.assertIsNone(meshio_glb._decompose(flat))
 
     def test_base_color_factor_and_pbr(self):
-        """baseColorFactor maps to hex; metallic/roughness factors
-        map to metalness/roughness. A material with no factors uses
-        the glTF defaults (white, metallic 1, rough 1); a primitive
+        """baseColorFactor maps to hex — as LINEAR light converted
+        to sRGB ([0.5, 0.25, 1.0] is #bc89ff, not the #8040ff a
+        straight-across read gives); metallic/roughness factors map
+        to metalness/roughness. A material with no factors uses the
+        glTF defaults (white, metallic 1, rough 1); a primitive
         with no material at all gets Reblend's default gray."""
         builder = glb_fixture.GlbBuilder()
         colored = builder.add_material(
@@ -2595,13 +2933,34 @@ class GlbImportTests(unittest.TestCase):
             path = self._write(tmp, builder)
             objects, _report = meshio.import_mesh(path)
         self.assertEqual(len(objects), 3)
-        self.assertEqual(objects[0]["material"]["base_color"], "#8040ff")
+        self.assertEqual(objects[0]["material"]["base_color"], "#bc89ff")
         self.assertEqual(objects[0]["material"]["metalness"], 0.7)
         self.assertEqual(objects[0]["material"]["roughness"], 0.25)
         self.assertEqual(objects[1]["material"]["base_color"], "#ffffff")
         self.assertEqual(objects[1]["material"]["metalness"], 1.0)
         self.assertEqual(objects[1]["material"]["roughness"], 1.0)
         self.assertEqual(objects[2]["material"]["base_color"], "#b0b0b0")
+
+    def test_linear_factor_for_a_known_hex(self):
+        """The Yahtzee felt, read back: the linear factors for
+        #14663a ([0.006995, 0.132868, 0.042311]) import as #14663a
+        exactly — the linear -> sRGB conversion restores the hex
+        the author picked."""
+        builder = glb_fixture.GlbBuilder()
+        felt = builder.add_material(
+            "Felt", base_color=[0.006995, 0.132868, 0.042311, 1.0])
+        pos = builder.add_vec3([(1.0, 0.0, 0.0), (0.0, 1.0, 0.0),
+                                (0.0, 0.0, 1.0)])
+        idx = builder.add_indices([0, 1, 2])
+        mesh = builder.add_mesh("Tri", [
+            {"attributes": {"POSITION": pos}, "indices": idx,
+             "material": felt}])
+        node = builder.add_node("Tri", mesh=mesh)
+        builder.set_scene([node])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, builder)
+            objects, _report = meshio.import_mesh(path)
+        self.assertEqual(objects[0]["material"]["base_color"], "#14663a")
 
     def test_missing_normals_are_computed(self):
         """No NORMAL in the file: the box's normals are computed with
@@ -3629,6 +3988,34 @@ class GlbExportTests(unittest.TestCase):
             self.assertAlmostEqual(
                 material["roughness"],
                 original["material"]["roughness"], delta=1e-9)
+
+    def test_export_writes_linear_base_color_factor(self):
+        """The exporter writes baseColorFactor in LINEAR-sRGB, per
+        the glTF spec — not the sRGB hex numbers straight across.
+        The Yahtzee wash-out was exactly this bug: felt #14663a
+        exported as [0.078, 0.4, 0.227] and rendered mint green in
+        Three.js. The factor is read from the file's own JSON chunk
+        (not through the importer), so the check is not circular."""
+        felt = scene_mod.new_object("box", name="Felt")
+        felt["material"]["base_color"] = "#14663a"
+        body = scene_mod.new_object("box", name="Body")
+        body["material"]["base_color"] = "#101014"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "colors.glb")
+            meshio_glb.export_glb([felt, body], path, scale=0.01)
+            (_magic, _ver, _length, _size, _chunks, json_bytes,
+             _bin) = self._read_container(path)
+        gltf = json.loads(json_bytes.decode("utf-8"))
+        factors = {m["name"]: m["pbrMetallicRoughness"]["baseColorFactor"]
+                   for m in gltf["materials"]}
+        # #14663a -> linear [0.006995, 0.132868, 0.042311];
+        # #101014 -> linear [0.005182, 0.005182, 0.006995].
+        for got, want in zip(factors["mat_14663a"][:3],
+                             (0.006995, 0.132868, 0.042311)):
+            self.assertAlmostEqual(got, want, delta=0.002)
+        for got, want in zip(factors["mat_101014"][:3],
+                             (0.005182, 0.005182, 0.006995)):
+            self.assertAlmostEqual(got, want, delta=0.002)
 
     def test_transformed_object_round_trips_transform(self):
         """A box moved, rotated on all three axes, and scaled
@@ -7122,7 +7509,11 @@ class InspectorTextTests(unittest.TestCase):
                     "param_rust_patches", "param_crystal_size",
                     "param_thread_spacing", "param_loop_size",
                     "param_crease", "param_blades", "param_mow_stripes",
-                    "param_clump_size", "param_ripple_spacing"}
+                    "param_clump_size", "param_ripple_spacing",
+                    "layout", "layout_board_width",
+                    "layout_board_length", "layout_strip_width",
+                    "layout_block_size", "layout_square_size",
+                    "layout_slab_width", "layout_slab_length"}
         self.assertEqual(set(inspector_mod.FIELD_HELP), expected)
         for key, line in inspector_mod.FIELD_HELP.items():
             self.assertTrue(line, key)
@@ -7319,6 +7710,7 @@ class QtInspectorTests(unittest.TestCase):
     def test_every_field_has_plain_words_explanation(self):
         from PySide6 import QtWidgets
         from light_engine import inspector_data as inspector_mod
+        from light_engine import textures as textures_mod
         scene, emitter = self._scene_with_emitter()
         window = self.MainWindow(scene=scene)
         self._show(window)
@@ -7333,6 +7725,13 @@ class QtInspectorTests(unittest.TestCase):
                 # style's knobs (and their help labels) only exist
                 # while that style is picked, and the mug wears
                 # no style. They are checked per style below.
+                continue
+            if key == "layout" or key.startswith("layout_"):
+                # PO4: the layout help lines are contextual — the
+                # picker (and its help label) only exists in
+                # Advanced for a style with a choice, and the size
+                # rows only for the layout actually picked. They
+                # are checked per style below.
                 continue
             self.assertIn(text, labels, key)
             self.assertTrue(labels[text].isVisible(), key)
@@ -7352,6 +7751,26 @@ class QtInspectorTests(unittest.TestCase):
                 text = inspector_mod.FIELD_HELP[knob["help"]]
                 self.assertIn(text, labels, knob["help"])
                 self.assertTrue(labels[text].isVisible(), knob["help"])
+            # PO4: the layout rows explain themselves while shown.
+            # The picker shows only for styles with a choice, and
+            # the size rows only for the layout actually picked —
+            # so each layout is picked in turn.
+            layouts = textures_mod.layouts_for_style(style)
+            if len(layouts) > 1:
+                text = inspector_mod.FIELD_HELP["layout"]
+                self.assertIn(text, labels, "layout")
+                self.assertTrue(labels[text].isVisible(), "layout")
+                for layout in layouts:
+                    window._layout_combo.setCurrentIndex(
+                        window._layout_combo.findData(layout))
+                    self._pump(2)
+                    labels = {lbl.text(): lbl for lbl in
+                              window.findChildren(QtWidgets.QLabel)}
+                    for row in inspector_mod.LAYOUT_UI.get(layout, ()):
+                        text = inspector_mod.FIELD_HELP[row["help"]]
+                        self.assertIn(text, labels, row["help"])
+                        self.assertTrue(labels[text].isVisible(),
+                                        row["help"])
         window._select(emitter["id"])
         labels = {lbl.text(): lbl for lbl in
                   window.findChildren(QtWidgets.QLabel)}
@@ -11051,7 +11470,9 @@ class QtMaterialParamsTests(unittest.TestCase):
         self.assertAlmostEqual(window._param_spins["rings"].value(),
                                7.1, places=1)
         self.assertEqual(window._param_spins["strength"].value(), 0.3)
-        # Advanced shows every knob, wobble included.
+        # Advanced shows every knob, wobble included — plus the
+        # layout picker (PO4), which is Advanced-only. The current
+        # layout is solid, so no size rows follow it.
         window._material_advanced_check.setChecked(True)
         self._pump()
         self.assertEqual(set(window._param_spins),
@@ -11059,7 +11480,7 @@ class QtMaterialParamsTests(unittest.TestCase):
         labels = [window._param_layout.itemAt(i).widget().text()
                   for i in range(0, window._param_layout.count(), 3)]
         self.assertEqual(labels, ["Ring spacing", "Grain strength",
-                                  "Ring wobble"])
+                                  "Ring wobble", "Layout"])
         self.assertEqual(window._param_spins["wobble"].value(), 3.0)
         # Back to Simple: wobble's row goes, the others stay.
         window._material_advanced_check.setChecked(False)
@@ -11080,7 +11501,8 @@ class QtMaterialParamsTests(unittest.TestCase):
         labels = [window._param_layout.itemAt(i).widget().text()
                   for i in range(0, window._param_layout.count(), 3)]
         self.assertEqual(labels, ["Brick length", "Course height",
-                                  "Mortar width", "Tone variation"])
+                                  "Mortar width", "Tone variation",
+                                  "Layout"])
         self._pick_style(window, "none")
         self.assertEqual(window._param_spins, {})
         self.assertEqual(window._param_layout.count(), 0)
@@ -11132,11 +11554,11 @@ class QtMaterialParamsTests(unittest.TestCase):
         real_build = viewport_mod.build_qimage
 
         def counting(name, base_rgb, size=256, wood_strength=None,
-                     params=None):
+                     params=None, layout=None):
             calls.append((name, dict(params) if params else None))
             return real_build(name, base_rgb, size=size,
                               wood_strength=wood_strength,
-                              params=params)
+                              params=params, layout=layout)
 
         viewport_mod.build_qimage = counting
         try:
@@ -11504,6 +11926,313 @@ class QtMaterialSimpleAdvancedTests(unittest.TestCase):
         window._select("mug")
         self._pump()
         self.assertTrue(window._material_advanced_check.isEnabled())
+        window.close()
+
+
+@unittest.skipUnless(QT_TESTS, "Qt tests need LIGHT_ENGINE_QT_TESTS=1")
+class QtMaterialLayoutTests(unittest.TestCase):
+    """PO4: layouts + real-world sizes — the picker (Advanced-only,
+    hidden for solid-only styles), the size rows, one undo step per
+    pick and per size gesture, the style-pick reset, save/load
+    round-trip, the UI12 hover-preview, and renders that differ."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6 import QtWidgets
+        cls._app = QtWidgets.QApplication.instance()
+        if cls._app is None:
+            cls._app = QtWidgets.QApplication([])
+        from light_engine import window as window_mod
+        cls.MainWindow = window_mod.MainWindow
+
+    def _pump(self, rounds=10):
+        from PySide6 import QtCore, QtWidgets
+        for _ in range(rounds):
+            QtWidgets.QApplication.processEvents()
+            QtCore.QThread.msleep(50)
+
+    def _show(self, window):
+        window.resize(1280, 800)
+        window.show()
+        self._pump()
+
+    def _open_tavern_mug(self):
+        scene = scene_mod.load_scene(str(EXAMPLE))
+        window = self.MainWindow(scene=scene)
+        self._show(window)
+        window._select("mug")
+        return window
+
+    def _material(self, window):
+        return scene_mod.find_object(window.scene, "mug")["material"]
+
+    def _pick_style(self, window, style):
+        combo = window._texture_combo
+        combo.setCurrentIndex(combo.findData(style))
+        self._pump()
+
+    def _advanced(self, window):
+        window._material_advanced_check.setChecked(True)
+        self._pump()
+
+    def _pick_layout(self, window, layout):
+        # The combo is rebuilt on every sync, so fetch it fresh;
+        # the pick defers its row rebuild a turn (the combo is
+        # the signal sender), so pump before asserting rows.
+        combo = window._layout_combo
+        combo.setCurrentIndex(combo.findData(layout))
+        self._pump()
+
+    def _render_bytes(self, window, tmp):
+        path = os.path.join(tmp, "frame.png")
+        window.render_frame_to(0, path)
+        with open(path, "rb") as fh:
+            return fh.read()
+
+    def _hover(self, window, combo, name, expect):
+        """Hover a popup item for real (the C19 helper's shape:
+        move off the target first, then re-move until the
+        preview lands, up to ~2 s)."""
+        from PySide6 import QtTest
+        combo.showPopup()
+        self._pump(rounds=4)
+        view = combo.view()
+        index = combo.findData(name)
+        rect = view.visualRect(view.model().index(index, 0))
+        neutral = 0 if index != 0 else 1
+        neutral_rect = view.visualRect(
+            view.model().index(neutral, 0))
+        QtTest.QTest.mouseMove(view.viewport(), neutral_rect.center())
+        self._pump(rounds=2)
+        for _ in range(10):
+            QtTest.QTest.mouseMove(view.viewport(), rect.center())
+            self._pump(rounds=2)
+            if window._viewport._material_preview == expect:
+                return
+
+    def test_picker_hidden_for_solid_only_styles(self):
+        window = self._open_tavern_mug()
+        # Metal takes only solid: no picker, even in Advanced.
+        self._advanced(window)
+        self._pick_style(window, "metal_brushed")
+        self.assertIsNone(window._layout_combo)
+        self.assertEqual(window._layout_spins, {})
+        # And Simple hides the picker for every style, even one
+        # with a choice.
+        window._material_advanced_check.setChecked(False)
+        self._pick_style(window, "wood_cathedral")
+        self.assertIsNone(window._layout_combo)
+        self.assertEqual(window._layout_spins, {})
+        window.close()
+
+    def test_picker_shown_in_advanced_for_wood(self):
+        window = self._open_tavern_mug()
+        self._advanced(window)
+        self._pick_style(window, "wood_cathedral")
+        combo = window._layout_combo
+        self.assertIsNotNone(combo)
+        items = [(combo.itemText(i), combo.itemData(i))
+                 for i in range(combo.count())]
+        self.assertEqual(items, [("Solid", "solid"),
+                                 ("Boards", "boards"),
+                                 ("Parquet", "parquet"),
+                                 ("Chevron", "chevron"),
+                                 ("Herringbone", "herringbone"),
+                                 ("Strip", "strip")])
+        self.assertEqual(combo.currentData(), "solid")
+        # Solid has no pieces, so no size rows follow the picker.
+        self.assertEqual(window._layout_spins, {})
+        labels = [window._param_layout.itemAt(i).widget().text()
+                  for i in range(0, window._param_layout.count(), 3)]
+        self.assertEqual(labels, ["Ring spacing", "Grain strength",
+                                  "Ring wobble", "Layout"])
+        window.close()
+
+    def test_layout_pick_applies_and_undoes(self):
+        window = self._open_tavern_mug()
+        self._advanced(window)
+        self._pick_style(window, "wood_cathedral")
+        before = len(window._undo_stack)
+        self._pick_layout(window, "herringbone")
+        self.assertEqual(self._material(window)["layout"],
+                         "herringbone")
+        self.assertEqual(len(window._undo_stack), before + 1)
+        # The size rows rebuilt for herringbone, showing the
+        # layout's defaults.
+        self.assertEqual(set(window._layout_spins),
+                         {"board_width", "board_length"})
+        self.assertEqual(window._layout_spins["board_width"].value(),
+                         9.0)
+        self.assertEqual(window._layout_spins["board_length"].value(),
+                         54.0)
+        labels = [window._param_layout.itemAt(i).widget().text()
+                  for i in range(0, window._param_layout.count(), 3)]
+        self.assertEqual(labels, ["Ring spacing", "Grain strength",
+                                  "Ring wobble", "Layout",
+                                  "Board width", "Board length"])
+        window.undo()
+        self._pump()
+        self.assertEqual(self._material(window)["layout"], "solid")
+        self.assertIsNotNone(window._layout_combo)
+        self.assertEqual(window._layout_spins, {})
+        window.close()
+
+    def test_style_change_resets_layout(self):
+        window = self._open_tavern_mug()
+        self._advanced(window)
+        self._pick_style(window, "wood_cathedral")
+        self._pick_layout(window, "herringbone")
+        spin = window._layout_spins["board_width"]
+        spin.setValue(12.0)
+        spin.editingFinished.emit()
+        self.assertEqual(self._material(window)["layout_size"],
+                         {"board_width": 12.0})
+        before = len(window._undo_stack)
+        # Metal takes no layout: the pick resets to solid and
+        # clears the sizes, in the pick's own undo step.
+        self._pick_style(window, "metal_brushed")
+        self.assertEqual(self._material(window)["layout"], "solid")
+        self.assertEqual(self._material(window)["layout_size"], {})
+        self.assertEqual(len(window._undo_stack), before + 1)
+        self.assertIsNone(window._layout_combo)
+        # Brick defaults to stretcher, not solid.
+        self._pick_style(window, "brick_stretcher")
+        self.assertEqual(self._material(window)["layout"], "stretcher")
+        self.assertIsNotNone(window._layout_combo)
+        window.close()
+
+    def test_size_spin_edits_layout_size(self):
+        window = self._open_tavern_mug()
+        self._advanced(window)
+        self._pick_style(window, "wood_cathedral")
+        self._pick_layout(window, "herringbone")
+        before = len(window._undo_stack)
+        spin = window._layout_spins["board_width"]
+        spin.setValue(12.0)
+        spin.setValue(15.0)
+        spin.editingFinished.emit()
+        # One undo step for the gesture, with the final value.
+        self.assertEqual(len(window._undo_stack), before + 1)
+        self.assertEqual(self._material(window)["layout_size"],
+                         {"board_width": 15.0})
+        window.undo()
+        self._pump()
+        self.assertEqual(self._material(window)["layout_size"], {})
+        self.assertEqual(window._layout_spins["board_width"].value(),
+                         9.0)
+        window.close()
+
+    def test_size_default_is_pruned(self):
+        window = self._open_tavern_mug()
+        self._advanced(window)
+        self._pick_style(window, "wood_cathedral")
+        self._pick_layout(window, "herringbone")
+        before = len(window._undo_stack)
+        spin = window._layout_spins["board_width"]
+        spin.setValue(12.0)
+        spin.setValue(9.0)  # back to the default
+        spin.editingFinished.emit()
+        # A gesture that ends on the default stores nothing and
+        # pushes no step (T14).
+        self.assertEqual(len(window._undo_stack), before)
+        self.assertEqual(self._material(window)["layout_size"], {})
+        window.close()
+
+    def test_layout_round_trips_through_save_load(self):
+        window = self._open_tavern_mug()
+        self._advanced(window)
+        self._pick_style(window, "wood_cathedral")
+        self._pick_layout(window, "herringbone")
+        spin = window._layout_spins["board_width"]
+        spin.setValue(12.0)
+        spin.editingFinished.emit()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "scene.json")
+            scene_mod.save_scene(window.scene, path)
+            loaded = scene_mod.load_scene(path)
+        window.close()
+        window2 = self.MainWindow(scene=loaded)
+        self._show(window2)
+        window2._select("mug")
+        mat = scene_mod.find_object(window2.scene, "mug")["material"]
+        self.assertEqual(mat["layout"], "herringbone")
+        self.assertEqual(mat["layout_size"], {"board_width": 12.0})
+        window2.close()
+
+    def test_hover_preview_on_layout(self):
+        window = self._open_tavern_mug()
+        self._advanced(window)
+        self._pick_style(window, "wood_cathedral")
+        combo = window._layout_combo
+        with tempfile.TemporaryDirectory() as tmp:
+            before = self._render_bytes(window, tmp)
+            self._hover(window, combo, "herringbone",
+                        ("mug", {"layout": "herringbone"}))
+            self.assertEqual(window._viewport._material_preview,
+                             ("mug", {"layout": "herringbone"}))
+            self.assertNotEqual(self._render_bytes(window, tmp), before)
+            combo.hidePopup()
+            self._pump(rounds=4)
+            self.assertIsNone(window._viewport._material_preview)
+            # Byte-identical to before the hover: the stored
+            # layout survived untouched in the scene.
+            self.assertEqual(self._render_bytes(window, tmp), before)
+            self.assertEqual(self._material(window)["layout"], "solid")
+        window.close()
+
+    def test_board_width_renders_differently(self):
+        # The spec's done-when: board width 9 cm vs 18 cm renders
+        # differently.
+        window = self._open_tavern_mug()
+        self._advanced(window)
+        self._pick_style(window, "wood_cathedral")
+        self._pick_layout(window, "boards")
+        with tempfile.TemporaryDirectory() as tmp:
+            spin = window._layout_spins["board_width"]
+            spin.setValue(9.0)
+            spin.editingFinished.emit()
+            self._pump(rounds=4)
+            first = self._render_bytes(window, tmp)
+            spin.setValue(18.0)
+            spin.editingFinished.emit()
+            self._pump(rounds=4)
+            self.assertNotEqual(self._render_bytes(window, tmp), first)
+        window.close()
+
+    def test_brick_bond_pick_renders_differently(self):
+        window = self._open_tavern_mug()
+        self._advanced(window)
+        self._pick_style(window, "brick_stretcher")
+        with tempfile.TemporaryDirectory() as tmp:
+            first = self._render_bytes(window, tmp)
+            self._pick_layout(window, "flemish")
+            self.assertEqual(self._material(window)["layout"],
+                             "flemish")
+            self.assertNotEqual(self._render_bytes(window, tmp), first)
+        window.close()
+
+    def test_layout_rows_fit_the_pane(self):
+        # The tallest layout set (herringbone: picker + 2 spins)
+        # fits the pane sideways: the combo's and every spin's
+        # left and right edges land inside the inspector scroll
+        # viewport (the C8 pane-fit shape).
+        window = self._open_tavern_mug()
+        self._advanced(window)
+        self._pick_style(window, "wood_cathedral")
+        self._pick_layout(window, "herringbone")
+        scroll = window._inspector_scroll
+        viewport_width = scroll.viewport().width()
+        widgets = [window._layout_combo]
+        widgets.extend(window._layout_spins.values())
+        self.assertEqual(len(widgets), 3)
+        for widget in widgets:
+            top_left = scroll.viewport().mapFromGlobal(
+                widget.mapToGlobal(widget.rect().topLeft()))
+            bottom_right = scroll.viewport().mapFromGlobal(
+                widget.mapToGlobal(widget.rect().bottomRight()))
+            self.assertGreaterEqual(top_left.x(), 0, widget)
+            self.assertLessEqual(bottom_right.x(), viewport_width,
+                                 widget)
         window.close()
 
 

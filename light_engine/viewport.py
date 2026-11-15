@@ -80,7 +80,9 @@ from .geometry import (GIZMO_MIN_SCALE, GIZMO_MODES, GIZMO_MOVE_TIP,
                        ray_vs_plane, ray_vs_ring, tessellate,
                        tessellate_indexed)
 from .scene import default_smooth_shading, hex_to_rgb
-from .textures import build_qimage, merged_params
+from .textures import (build_qimage, layout_affects_bake,
+                       layout_shader_mode, merged_layout_size,
+                       merged_params, resolve_layout, resolve_style)
 
 # GL enum values (kept numeric, as in the Bench pattern, so the calls read
 # the same as the OpenGL docs). Core profile only — no fixed-function
@@ -319,7 +321,7 @@ class Viewport(QOpenGLWidget):
         # Mesh objects are indexed by definition (T7, via _is_indexed)
         # and never need this hook.
         self._indexed = set()
-        self._textures = {}  # (texture name, base color, params) -> QOpenGLTexture
+        self._textures = {}  # (texture name, base color, params, bond) -> QOpenGLTexture
         # Hover-preview (UI12): (object id, material overrides) or
         # None. While set, that one object renders with the
         # overrides instead of its stored material; the scene is
@@ -805,7 +807,7 @@ class Viewport(QOpenGLWidget):
         self._vbos[obj["id"]] = entry
         return entry
 
-    def _ensure_texture(self, name, base_color, params=None):
+    def _ensure_texture(self, name, base_color, params=None, layout=None):
         # The cache key includes the merged params (PO2): a knob
         # change bakes a new texture instead of reusing the old
         # one. Merged (defaults + overrides), so "no params" and
@@ -814,13 +816,20 @@ class Viewport(QOpenGLWidget):
         # the two can never disagree. Each distinct param set
         # costs one 128x128 texture (~64 KB); the cache is
         # cleared on set_scene, so a long session stays small.
+        # PO4: the key also carries the brick bond — the layout
+        # changes the baked tile for brick only (other styles lay
+        # out in the shader), so the bond is None for every other
+        # style and those keys are unchanged apart from the extra
+        # element. A bond change bakes a new texture; a shader
+        # layout change needs no bake at all.
         merged = merged_params(name, params)
-        key = (name, base_color, tuple(sorted(merged.items())))
+        bond = layout if layout_affects_bake(name) else None
+        key = (name, base_color, tuple(sorted(merged.items())), bond)
         tex = self._textures.get(key)
         if tex is not None:
             return tex
         img = build_qimage(name, hex_to_rgb(base_color), size=128,
-                           params=merged)
+                           params=merged, layout=bond)
         tex = QOpenGLTexture(img)
         tex.setMinificationFilter(QOpenGLTexture.LinearMipMapLinear)
         tex.setMagnificationFilter(QOpenGLTexture.Linear)
@@ -1560,6 +1569,20 @@ class Viewport(QOpenGLWidget):
             roughness = float(mat.get("roughness", 0.6))
             metalness = float(mat.get("metalness", 0.0))
             texture = mat.get("texture", "none")
+            # Layout (PO4): the shader mode + piece sizes for this
+            # object, from the (possibly preview-merged) material.
+            # Set on every draw — uniforms persist across draws,
+            # so a textured object after an untextured one must not
+            # inherit the previous object's mode. Untextured
+            # objects resolve to mode 0, which the shader ignores.
+            style = resolve_style(texture)
+            layout = resolve_layout(style, mat.get("layout"))
+            _set_scalar(gl, prog, "uLayoutMode",
+                        layout_shader_mode(style, layout))
+            width, length = merged_layout_size(
+                layout, mat.get("layout_size"))
+            prog.setUniformValue("uLayoutSize",
+                                 QtGui.QVector2D(width, length))
             model = self._model_matrix(obj)
             qm = QtGui.QMatrix4x4(*[v for row in model for v in row])
             prog.setUniformValue("uModel", qm)
@@ -1576,7 +1599,7 @@ class Viewport(QOpenGLWidget):
             if texture and texture != "none":
                 self._ensure_texture(
                     texture, mat.get("base_color", "#b0b0b0"),
-                    mat.get("params")).bind()
+                    mat.get("params"), mat.get("layout")).bind()
                 _set_scalar(gl, prog, "uUseTexture", 1)
             else:
                 _set_scalar(gl, prog, "uUseTexture", 0)

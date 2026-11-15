@@ -8,6 +8,17 @@ basic PBR material colors (baseColorFactor -> base_color,
 metallicFactor / roughnessFactor -> metalness / roughness). One mesh
 primitive becomes one object.
 
+COLOR SPACE: glTF baseColorFactor is LINEAR-sRGB (the spec's
+definition — a renderer treats it as linear light), while Reblend's
+hex colors are sRGB (the numbers a person picks). The two must not
+be confused: the exporter linearizes sRGB -> linear when it writes
+the factor, and the importer converts linear -> sRGB when it reads
+it back, so a round-trip restores the exact hex. Before this fix
+both directions copied the numbers straight across, which made
+every exported material render about 2x too bright in Three.js
+(the Yahtzee v2 wash-out: felt #14663a exported as [0.078, 0.4,
+0.227] instead of the linear [0.007, 0.133, 0.042]).
+
 Coordinate conversion: glTF is Y-up in meters; Reblend is Z-up in cm.
 A position converts (x, y, z) -> (x, -z, y) and scales by the import
 scale (default 100, meters to cm). Normals get the same rotation, no
@@ -93,6 +104,27 @@ _CONVERT_INV = [[1.0, 0.0, 0.0, 0.0],
 
 class GlbError(ValueError):
     """A plain-language .glb problem (bad header, bad accessor, ...)."""
+
+
+def _srgb_to_linear(c):
+    """One sRGB channel (0..1) to linear light (0..1): the standard
+    IEC 61966-2-1 transfer function. Used on export — glTF
+    baseColorFactor is linear-sRGB."""
+    c = max(0.0, min(1.0, float(c)))
+    if c <= 0.04045:
+        return c / 12.92
+    return ((c + 0.055) / 1.055) ** 2.4
+
+
+def _linear_to_srgb(c):
+    """One linear-light channel (0..1) to sRGB (0..1): the inverse
+    of _srgb_to_linear. Used on import — a baseColorFactor read
+    from a file is linear light, and Reblend's hex colors are
+    sRGB."""
+    c = max(0.0, min(1.0, float(c)))
+    if c <= 0.0031308:
+        return c * 12.92
+    return 1.055 * c ** (1.0 / 2.4) - 0.055
 
 
 def _rgb_to_hex(r, g, b):
@@ -393,7 +425,12 @@ def _material_for(gltf, index, warnings, mesh_name):
     factor = pbr.get("baseColorFactor")
     if isinstance(factor, list) and len(factor) >= 3:
         try:
-            color = _rgb_to_hex(factor[0], factor[1], factor[2])
+            # The factor is linear light per the glTF spec; convert
+            # to sRGB before making the hex, or every imported
+            # color comes out too dark.
+            color = _rgb_to_hex(_linear_to_srgb(factor[0]),
+                                _linear_to_srgb(factor[1]),
+                                _linear_to_srgb(factor[2]))
         except (TypeError, ValueError):
             warnings.append(
                 f"material '{name}' has a bad base color, "
@@ -1050,7 +1087,12 @@ def write_glb(items, path, scale=DEFAULT_EXPORT_SCALE):
                 mat_name = f"{base}-{n}"
                 n += 1
             taken_names.add(mat_name)
-            r, g, b = _hex_to_rgb_fractions(color)
+            # The hex is sRGB; the factor must be linear light per
+            # the glTF spec — writing the sRGB numbers straight
+            # across makes the material render ~2x too bright in a
+            # spec-correct renderer (the Yahtzee v2 wash-out).
+            r, g, b = (_srgb_to_linear(v)
+                       for v in _hex_to_rgb_fractions(color))
             material_defs.append({
                 "name": mat_name,
                 "pbrMetallicRoughness": {

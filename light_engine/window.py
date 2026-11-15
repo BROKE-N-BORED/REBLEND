@@ -22,15 +22,18 @@ from . import particles as particles_mod
 from . import style as style_mod
 from . import video as video_mod
 from .inspector_data import FIELD_HELP, _physics_enabled
-from .inspector_data import param_knobs_for
+from .inspector_data import layout_rows_for, param_knobs_for
 from .scene import (EMITTER_COLLIDE, EMITTER_PRESETS, EMITTER_SHAPES,
                     MATERIAL_PRESETS, default_smooth_shading,
                     find_object, load_scene, material_preset_for,
                     new_emitter, new_object, new_scene,
                     resolve_material_style, save_scene, scene_copy,
                     total_triangles)
-from .textures import (FAMILIES, STYLES, count_to_spacing,
-                       merged_params, spacing_to_count, style_params)
+from .textures import (FAMILIES, LAYOUT_DISPLAY, STYLES,
+                       count_to_spacing, default_layout,
+                       layouts_for_style, merged_layout_size,
+                       merged_params, resolve_layout, spacing_to_count,
+                       style_params)
 from .viewport import Viewport
 
 SOFT_TRI_BUDGET = 100000
@@ -1469,9 +1472,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # material (no undo step, no modified flag). Default is
         # Simple (unchecked): the spec's default mode. The
         # toggle is always visible, like the look tick — PO4's
-        # layout rows and PO5's wear rows will make it meaningful
-        # for nearly every style, so it stays put instead of
-        # appearing and vanishing with the style.
+        # layout rows make it meaningful for nearly every style,
+        # so it stays put instead of appearing and vanishing with
+        # the style.
         self._material_advanced_check = QtWidgets.QCheckBox(
             "Show all settings")
         self._material_advanced_check.toggled.connect(
@@ -1493,6 +1496,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._param_layout.setContentsMargins(0, 0, 0, 0)
         self._param_rows.setVisible(False)
         self._param_spins = {}
+        # Layout rows (PO4): the picker combo and the size spins,
+        # rebuilt with the knobs in _sync_param_rows. None / empty
+        # while the current style takes no layout or the mode is
+        # Simple.
+        self._layout_combo = None
+        self._layout_spins = {}
         body.addWidget(self._param_rows)
         # The re-bake debounce (see PARAM_REBAKE_MS): a knob
         # change restarts it, and the repaint fires once, 150 ms
@@ -1848,8 +1857,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # only the simple knobs in Simple, every knob in
         # Advanced — so a hidden knob keeps its stored override
         # and shows it again when the mode changes. PO4's layout
-        # rows and PO5's wear rows slot in here, after the param
-        # knobs, Advanced-only, when their tasks land. The old
+        # rows slot in here, after the param knobs, Advanced-only
+        # (PO5's wear rows will follow the same pattern). The old
         # rows are taken out of the layout and deleted at once,
         # so a style with fewer knobs leaves nothing behind; the
         # spins are built with their values set before the
@@ -1862,12 +1871,18 @@ class MainWindow(QtWidgets.QMainWindow):
         # Immediate deletion is safe here — the old spins are
         # never the signal sender when this runs (the callers
         # are the style pick, the inspector refresh, and the
-        # Advanced toggle, none of which is a knob spin).
+        # Advanced toggle, none of which is a knob spin). The
+        # one exception is the layout pick: the layout combo
+        # lives inside this container, so _on_layout_changed
+        # defers its rebuild a turn instead of calling this
+        # directly — deleting the sender mid-signal would crash.
         while self._param_layout.count():
             item = self._param_layout.takeAt(0)
             if item.widget() is not None:
                 shiboken6.delete(item.widget())
         self._param_spins = {}
+        self._layout_combo = None
+        self._layout_spins = {}
         style = resolve_material_style(mat)
         params = merged_params(style, mat.get("params"))
         for knob in param_knobs_for(
@@ -1889,9 +1904,57 @@ class MainWindow(QtWidgets.QMainWindow):
             self._param_spins[knob["param"]] = spin
             self._param_layout.addWidget(spin)
             self._param_layout.addWidget(self._help(knob["help"]))
+        # Layout rows (PO4): the picker + the current layout's
+        # size rows, Advanced-only, after the param knobs. A
+        # style with one layout ("solid" only) hides the picker
+        # entirely — there is nothing to choose. The picker and
+        # spins are rebuilt with the knobs on every sync, so
+        # they always match the stored material; the combo is
+        # built with its value set before the signals are
+        # connected, so syncing never fires a change. The layout
+        # combo gets the shared popup hide filter, so closing
+        # its popup ends a hover-preview like the texture and
+        # preset popups do.
+        if self._material_advanced_check.isChecked():
+            layouts = layouts_for_style(style)
+            if len(layouts) > 1:
+                current = resolve_layout(style, mat.get("layout"))
+                self._param_layout.addWidget(QtWidgets.QLabel("Layout"))
+                combo = QtWidgets.QComboBox()
+                for key in layouts:
+                    combo.addItem(LAYOUT_DISPLAY[key], key)
+                combo.setCurrentIndex(combo.findData(current))
+                combo.currentIndexChanged.connect(
+                    self._on_layout_changed)
+                combo.highlighted.connect(self._on_layout_highlighted)
+                combo.view().installEventFilter(
+                    self._preview_hide_filter)
+                self._layout_combo = combo
+                self._param_layout.addWidget(combo)
+                self._param_layout.addWidget(self._help("layout"))
+                width, length = merged_layout_size(
+                    current, mat.get("layout_size"))
+                sizes = {"board_width": width, "board_length": length}
+                for row in layout_rows_for(current):
+                    self._param_layout.addWidget(
+                        QtWidgets.QLabel(row["label"]))
+                    spin = QtWidgets.QDoubleSpinBox()
+                    spin.setRange(row["low"], row["high"])
+                    spin.setDecimals(row["decimals"])
+                    spin.setSingleStep(row["step"])
+                    spin.setMinimumWidth(48)
+                    spin.setValue(round(sizes[row["key"]],
+                                        row["decimals"]))
+                    spin.valueChanged.connect(
+                        lambda v, k=row: self._on_layout_size_changed(k, v))
+                    spin.editingFinished.connect(self._commit_live_edit)
+                    self._layout_spins[row["key"]] = spin
+                    self._param_layout.addWidget(spin)
+                    self._param_layout.addWidget(self._help(row["help"]))
         # Hidden while empty, so a style-less material leaves
         # the inspector exactly as it was before PO2.
-        self._param_rows.setVisible(bool(self._param_spins))
+        self._param_rows.setVisible(
+            bool(self._param_spins) or self._layout_combo is not None)
 
     def _on_material_advanced_toggled(self, _checked):
         # Simple / Advanced (PO3): rebuild the knob rows for the
@@ -2224,6 +2287,13 @@ class MainWindow(QtWidgets.QMainWindow):
             # same undo step as the pick, and the knob rows
             # rebuild for the new style at once.
             mat["params"] = {}
+            # A new style starts from its own layout too (PO4):
+            # the layout resets to the new style's default and
+            # the sizes clear, in the same undo step — a stored
+            # herringbone must not follow the material onto a
+            # style that takes no layout.
+            mat["layout"] = default_layout(text)
+            mat["layout_size"] = {}
             self._sync_param_rows(mat)
             self._viewport.update()
 
@@ -2391,6 +2461,88 @@ class MainWindow(QtWidgets.QMainWindow):
         # single-shot timer restarts it, so a drag coalesces
         # into one repaint.
         self._param_rebake_timer.start()
+
+    def _on_layout_changed(self, index):
+        # Picking a layout (PO4): one undo step, the size rows
+        # rebuild for the new layout. The rebuild is deferred a
+        # turn: the layout combo lives inside _param_rows, so a
+        # rebuild here would delete the combo mid-signal (see
+        # _sync_param_rows). A brick pick re-bakes on the next
+        # paint through the texture cache key — no debounce
+        # needed for a discrete pick — and a shader layout
+        # applies through the uniforms at once.
+        if self._refreshing:
+            return
+        obj = find_object(self.scene, self.selected_id) if self.selected_id else None
+        if obj is None or self._layout_combo is None:
+            return
+        name = self._layout_combo.itemData(index)
+        if name is None:
+            return
+        mat = obj.setdefault("material", {})
+        style = resolve_material_style(mat)
+        if resolve_layout(style, mat.get("layout")) != name:
+            self._clear_material_preview()
+            self._push_undo()
+            mat["layout"] = name
+            self._viewport.update()
+            QtCore.QTimer.singleShot(0, self._sync_layout_rows_now)
+
+    def _sync_layout_rows_now(self):
+        # The deferred half of _on_layout_changed: rebuild the
+        # rows for whatever is selected now (the selection may
+        # have moved since the pick).
+        obj = find_object(self.scene, self.selected_id) \
+            if self.selected_id else None
+        self._sync_param_rows(obj.get("material", {}) if obj else {})
+
+    def _on_layout_highlighted(self, index):
+        # Hovering a layout previews it on the selected object
+        # (UI12, entry 017): see it before you commit. The
+        # previewed layout shows with the stored sizes — the
+        # sizes are shared across layouts, so there is nothing
+        # to pin. Restoring returns the stored layout.
+        if self._refreshing or self._layout_combo is None:
+            return
+        name = self._layout_combo.itemData(index)
+        if name is None:
+            self._clear_material_preview()
+            return
+        self._preview_material({"layout": name})
+
+    def _on_layout_size_changed(self, row, value):
+        # A layout size edit (PO4, live-edit pattern, like the
+        # param knobs): the gesture arms on the first change and
+        # commits on editingFinished. The comparison is against
+        # the EFFECTIVE size (layout defaults merged in), so
+        # setting the displayed default is a true no-op, and a
+        # value equal to the layout's default is not stored at
+        # all: layout_size holds overrides only, so a gesture
+        # that ends on the default compares equal to its snapshot
+        # (T14). No debounce: a size change is a shader uniform,
+        # not a re-bake, so the repaint is instant.
+        if self._refreshing:
+            return
+        obj = find_object(self.scene, self.selected_id) if self.selected_id else None
+        if obj is None:
+            return
+        size_value = round(value, row["decimals"])
+        mat = obj.setdefault("material", {})
+        sizes = mat.setdefault("layout_size", {})
+        style = resolve_material_style(mat)
+        layout = resolve_layout(style, mat.get("layout"))
+        width, length = merged_layout_size(layout, sizes)
+        effective = {"board_width": width, "board_length": length}
+        if effective[row["key"]] != size_value:
+            self._arm_live_edit()
+            default_width, default_length = merged_layout_size(layout)
+            defaults = {"board_width": default_width,
+                        "board_length": default_length}
+            if size_value == defaults[row["key"]]:
+                sizes.pop(row["key"], None)
+            else:
+                sizes[row["key"]] = size_value
+            self._viewport.update()
 
     def _on_smooth_shading_changed(self, checked):
         if self._refreshing:

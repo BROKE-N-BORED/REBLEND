@@ -65,7 +65,7 @@ import os
 import uuid
 
 from .geometry import default_params
-from .textures import LEGACY_TEXTURE_MAP, STYLES
+from .textures import LEGACY_TEXTURE_MAP, STYLES, resolve_layout
 
 # Every texture value a material may carry: "none" plus every style
 # key in the PO1 library.
@@ -73,6 +73,7 @@ TEXTURES = ("none",) + tuple(STYLES)
 MATERIAL_DEFAULTS = {"base_color": "#b0b0b0", "roughness": 0.6,
                      "metalness": 0.0, "style": "none",
                      "texture": "none", "params": {},
+                     "layout": "solid", "layout_size": {},
                      "density": 1.0, "friction": 0.5,
                      "restitution": 0.3}
 
@@ -373,6 +374,23 @@ def default_material(overrides=None):
     # maps to its style here (see resolve_material_style).
     mat["style"] = resolve_material_style(overrides)
     mat["texture"] = mat["style"]
+    # "layout" (PO4): how the pattern is laid, in real centimetres.
+    # Resolved against the style, so a stored layout from another
+    # style (or a mistyped one) becomes the style's default —
+    # brick defaults to "stretcher", everything else to "solid".
+    # "layout_size" holds the piece sizes as overrides only, like
+    # "params": {} means the layout's defaults. Normalized to a
+    # fresh dict on every call, for the same shared-{} reason.
+    mat["layout"] = resolve_layout(mat["style"], mat.get("layout"))
+    raw_sizes = mat.get("layout_size")
+    if isinstance(raw_sizes, dict):
+        mat["layout_size"] = {
+            key: float(value)
+            for key, value in raw_sizes.items()
+            if isinstance(value, (int, float))
+            and not isinstance(value, bool)}
+    else:
+        mat["layout_size"] = {}
     # "params" (PO2): the style's knob values, overrides only.
     # Normalized to a fresh dict on every call — MATERIAL_DEFAULTS
     # holds one shared {} and a shallow copy must never leak it

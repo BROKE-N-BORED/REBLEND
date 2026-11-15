@@ -41,7 +41,8 @@ run "A2 headless" \
   test_light_engine.SteppedParticleTests \
   test_light_engine.MaterialPhysicsTests \
   test_light_engine.MaterialLibraryTests \
-  test_light_engine.MaterialParamsTests
+  test_light_engine.MaterialParamsTests \
+  test_light_engine.MaterialLayoutsTests
 run "B2 headless" \
   test_light_engine.ObjImportTests test_light_engine.GlbImportTests \
   test_light_engine.ObjExportTests test_light_engine.GlbExportTests \
@@ -101,6 +102,7 @@ if [ "$LIGHT_ENGINE_QT_TESTS" = "1" ]; then
   run "C20 QtMaterialLibrary" test_light_engine.QtMaterialLibraryTests
   run "C21 QtMaterialParams" test_light_engine.QtMaterialParamsTests
   run "C22 QtMaterialSimpleAdvanced" test_light_engine.QtMaterialSimpleAdvancedTests
+  run "C23 QtMaterialLayout" test_light_engine.QtMaterialLayoutTests
 fi
 if [ "$fail" = "0" ]; then
   echo "All groups passed."
