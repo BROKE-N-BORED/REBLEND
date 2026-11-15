@@ -1,0 +1,17 @@
+# Reblend headless suite, on every push. No dependencies: the headless
+# suite needs no PySide6 (F1), so this runs on a bare Python.
+name: Suite
+
+on:
+  push:
+
+jobs:
+  headless:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run headless suite
+        run: python3 -m unittest discover -s tests
