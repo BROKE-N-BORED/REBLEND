@@ -35,7 +35,7 @@ from .textures import (FAMILIES, LAYOUT_DISPLAY, STYLES,
                        layouts_for_style, merged_layout_size,
                        merged_params, merged_wear, resolve_layout,
                        spacing_to_count, style_params)
-from .viewport import Viewport
+from .viewport import PieMenu, PieSlice, Viewport
 
 SOFT_TRI_BUDGET = 100000
 
@@ -1013,6 +1013,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # The emitter editor window (UI2); None until first opened,
         # then one shared instance, re-targeted per emitter.
         self._emitter_editor = None
+        # The pie menu (UI9); None until first opened, then one
+        # shared instance, re-opened at the cursor each time.
+        self._pie_menu = None
         self._play_timer = QtCore.QTimer(self)
         self._play_timer.timeout.connect(self._advance_frame)
         self._build_ui()
@@ -1047,6 +1050,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._play_timer.stop()
         if self._emitter_editor is not None:
             self._emitter_editor.close()
+        if self._pie_menu is not None:
+            self._pie_menu.close()
         self._viewport.cleanup_gl()
         # UI3 (U5): remember where the window was for the next run.
         self._save_window_state()
@@ -1292,6 +1297,13 @@ class MainWindow(QtWidgets.QMainWindow):
             shortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
             shortcut.activated.connect(
                 lambda m=mode: self._set_gizmo_mode(m))
+        # Pie menu (UI9): Q opens the radial menu at the cursor.
+        # Same pane context as W/E/R — it fires when the viewport
+        # or the camera row has focus, never while typing in
+        # another pane.
+        pie_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Q"), pane)
+        pie_shortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
+        pie_shortcut.activated.connect(self._toggle_pie_menu)
         gizmo_row.addStretch(1)
         layout.addLayout(gizmo_row)
         layout.addWidget(self._viewport, 1)
@@ -2146,6 +2158,59 @@ class MainWindow(QtWidgets.QMainWindow):
         the buttons here cannot re-enter this method."""
         self._viewport.set_gizmo_mode(mode)
         self._gizmo_buttons[mode].setChecked(True)
+
+    # -- pie menu (UI9) --------------------------------------------------
+    def _pie_slices(self):
+        """The UI9 pie: gizmo modes on the top arc, Add on the
+        bottom arc — Move north, then clockwise: Rotate, Scale,
+        Box, Sphere, Cylinder, Cone, Plane. The actions are the
+        same code paths as the toolbar buttons and the Add panel,
+        not copies."""
+        return [
+            PieSlice("Move",
+                     lambda: self._set_gizmo_mode("move")),
+            PieSlice("Rotate",
+                     lambda: self._set_gizmo_mode("rotate")),
+            PieSlice("Scale",
+                     lambda: self._set_gizmo_mode("scale")),
+            PieSlice("Box", lambda: self._add_object("box")),
+            PieSlice("Sphere", lambda: self._add_object("sphere")),
+            PieSlice("Cylinder",
+                     lambda: self._add_object("cylinder")),
+            PieSlice("Cone", lambda: self._add_object("cone")),
+            PieSlice("Plane", lambda: self._add_object("plane")),
+        ]
+
+    def _toggle_pie_menu(self):
+        """Q: open the pie at the cursor, or close it if it is
+        open. Closing through close() reports a dismiss, so focus
+        still returns to the viewport."""
+        if self._pie_menu is not None and self._pie_menu.isVisible():
+            self._pie_menu.close()
+            return
+        self._open_pie_menu()
+
+    def _open_pie_menu(self):
+        """Open the pie menu at the cursor (UI9), clamped to the
+        viewport. Opening changes nothing — no re-render, no
+        camera move, no selection change, no undo step."""
+        if self._pie_menu is None:
+            self._pie_menu = PieMenu(self._pie_slices(),
+                                     self._viewport)
+            self._pie_menu.picked.connect(self._on_pie_picked)
+            self._pie_menu.dismissed.connect(self._on_pie_dismissed)
+        bounds = QtCore.QRect(
+            self._viewport.mapToGlobal(QtCore.QPoint(0, 0)),
+            self._viewport.size())
+        self._pie_menu.open_at(QtGui.QCursor.pos(), bounds)
+
+    def _on_pie_picked(self, _index):
+        # The slice's own action already ran; the menu just hands
+        # focus back to the viewport so W/E/R keep working.
+        self._viewport.setFocus()
+
+    def _on_pie_dismissed(self):
+        self._viewport.setFocus()
 
     def _on_outliner_changed(self, current, _previous):
         if self._refreshing or current is None:

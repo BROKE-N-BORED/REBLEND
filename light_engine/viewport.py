@@ -70,6 +70,7 @@ from . import animation as anim_mod
 from . import meshfile as meshfile_mod
 from . import particles as particles_mod
 from . import shaders as shader_mod
+from . import style as style_mod
 from .geometry import (GIZMO_MIN_SCALE, GIZMO_MODES, GIZMO_MOVE_TIP,
                        GIZMO_PICK_TOLERANCE, GIZMO_RING_RADIUS,
                        GIZMO_SCALE_CUBE_CENTER, GIZMO_SCALE_CUBE_HALF,
@@ -2099,3 +2100,407 @@ class Viewport(QOpenGLWidget):
                                 min(self.span() * 30.0, self.distance))
             self.update()
         super().wheelEvent(event)
+
+
+# -- pie menu (UI9) ---------------------------------------------------------
+# A radial menu that opens at the cursor (library entry 016: flick,
+# don't hunt — the choice is a direction the hand learns). Generic
+# by design: PieMenu takes a list of PieSlice definitions and knows
+# nothing about what the slices do; the window wires the actions.
+# PO6 reuses this widget for the radial material wheel.
+#
+# Extension points for PO6 (the wheel):
+# - PieSlice.swatch: an optional QColor or QPixmap drawn in the
+#   slice (the wheel's style chips). Drawn when set, ignored
+#   otherwise; UI9 leaves it unset.
+# - PieMenu.centre_text: text drawn in the centre dead zone (the
+#   wheel's current knob value). Empty by default; UI9 never sets
+#   it.
+# - A second ring: _slice_at() picks a slice from a point's angle
+#   and radius, and _span() lays the slices out from the count — a
+#   subclass adds a second ring by picking a ring from the radius
+#   first and laying each ring out the same way. The pick /
+#   dismiss / keyboard paths take a slice index, so they need no
+#   change.
+# - Search: a subclass can filter self._slices and call update() —
+#   the geometry follows the slice count, so a filtered list just
+#   re-lays-out. (Set the slices through _set_slices, not by
+#   replacing the list, so the 8-slice cap still holds.)
+
+PIE_MAX_SLICES = 8    # entry 016 / Blender's PIE_MAX_ITEMS: one per
+                      # compass direction; past eight the flick
+                      # becomes a hunt again.
+PIE_RADIUS = 110      # outer radius in px
+PIE_DEAD_RADIUS = 30  # centre dead zone: a release here dismisses
+PIE_PAD = 6           # transparent margin around the disc
+PIE_OPEN_MS = 120     # appear animation (skipped under reduced
+                      # motion — cheap motion only, his PC has no GPU)
+PIE_OVERSHOOT = 60    # a flick may land this far past the rim and
+                      # still pick by direction
+
+
+class PieSlice:
+    """One slice of a PieMenu: a label, what it does, and an
+    optional swatch. `action` is a zero-argument callable run on
+    pick (None means the slice picks but does nothing — the caller
+    reads the index from the picked signal instead). `swatch` is a
+    QColor or QPixmap drawn in the slice (PO6's style chips)."""
+
+    def __init__(self, label, action=None, swatch=None):
+        self.label = label
+        self.action = action
+        self.swatch = swatch
+
+
+class PieMenu(QtWidgets.QWidget):
+    """A generic radial menu (UI9). Opens at the cursor, centred on
+    it; pick by clicking a slice, by flicking (press, drag in a
+    direction, release — the release point picks), or by number
+    key. Arrow keys move the highlight around the ring, Enter or
+    Space picks it. Esc, Q, or a click outside dismisses without
+    picking. The menu is a Qt popup over the viewport, never GL —
+    opening or dismissing it touches no scene state, no camera,
+    and no undo step.
+
+    Signals: picked(index) after a pick (the slice's action runs
+    right after the signal), dismissed() after a close with no
+    pick. Exactly one of the two fires per open.
+    """
+
+    picked = QtCore.Signal(int)
+    dismissed = QtCore.Signal()
+
+    def __init__(self, slices, parent=None):
+        super().__init__(parent)
+        if not slices:
+            raise ValueError("a pie menu needs at least one slice")
+        if len(slices) > PIE_MAX_SLICES:
+            raise ValueError(
+                f"a pie menu holds at most {PIE_MAX_SLICES} slices, "
+                f"got {len(slices)}")
+        self._slices = list(slices)
+        self._hover = None      # highlighted slice index, or None
+        self._closed = False    # the outcome was already reported
+        self._filter_installed = False
+        self._scale = 1.0       # appear-animation factor
+        self._anim = None
+        self.centre_text = ""   # PO6 hook: the knob value readout
+        self.setWindowFlags(QtCore.Qt.Popup
+                            | QtCore.Qt.FramelessWindowHint)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        side = 2 * (PIE_RADIUS + PIE_PAD)
+        self.setFixedSize(side, side)
+        self._centre = QtCore.QPoint(side // 2, side // 2)
+
+    # -- geometry -----------------------------------------------------
+    def _span(self):
+        return 360.0 / len(self._slices)
+
+    def _slice_at(self, pos, overshoot=False):
+        """The slice index under a widget-local point, or None for
+        the dead zone or outside the disc. With overshoot, a point
+        past the rim still picks by direction (a flick may land
+        wide) as long as it stays within PIE_OVERSHOOT of the rim.
+        Slice 0 is centred on north; slices run clockwise."""
+        dx = pos.x() - self._centre.x()
+        dy = pos.y() - self._centre.y()
+        r = math.hypot(dx, dy)
+        if r < PIE_DEAD_RADIUS:
+            return None
+        if r > PIE_RADIUS:
+            if not overshoot or r > PIE_RADIUS + PIE_OVERSHOOT:
+                return None
+        angle = math.degrees(math.atan2(-dy, dx))  # 0=E, 90=N
+        span = self._span()
+        return int(round((90.0 - angle) / span)) % len(self._slices)
+
+    def slice_point(self, index):
+        """A widget-local point in the middle of a slice — where a
+        click or a flick lands. Tests and the verify script click
+        here rather than guessing pixel positions."""
+        span = self._span()
+        mid = math.radians(90.0 - index * span)
+        r = (PIE_DEAD_RADIUS + PIE_RADIUS) / 2.0
+        return QtCore.QPoint(
+            int(round(self._centre.x() + r * math.cos(mid))),
+            int(round(self._centre.y() - r * math.sin(mid))))
+
+    def _set_slices(self, slices):
+        """Replace the slice list (PO6's search filter). The cap
+        still holds; the geometry follows the new count."""
+        if not slices:
+            raise ValueError("a pie menu needs at least one slice")
+        if len(slices) > PIE_MAX_SLICES:
+            raise ValueError(
+                f"a pie menu holds at most {PIE_MAX_SLICES} slices, "
+                f"got {len(slices)}")
+        self._slices = list(slices)
+        self._hover = None
+        self.update()
+
+    # -- open / close -------------------------------------------------
+    def _get_scale(self):
+        return self._scale
+
+    def _set_scale(self, value):
+        self._scale = value
+        self.update()
+
+    scale = QtCore.Property(float, _get_scale, _set_scale)
+
+    def open_at(self, global_pos, bounds):
+        """Show the menu centred on a global point, clamped so the
+        whole menu stays inside `bounds` (a global QRect — the
+        viewport's). If the bounds are smaller than the menu, it
+        pins to the bounds' top-left."""
+        self._closed = False
+        self._hover = None
+        if self._anim is not None:
+            self._anim.stop()
+            self._anim = None
+        top_left = global_pos - QtCore.QPoint(self.width() // 2,
+                                              self.height() // 2)
+        if self.width() > bounds.width():
+            x = bounds.left()
+        else:
+            x = max(bounds.left(),
+                    min(top_left.x(),
+                        bounds.right() - self.width() + 1))
+        if self.height() > bounds.height():
+            y = bounds.top()
+        else:
+            y = max(bounds.top(),
+                    min(top_left.y(),
+                        bounds.bottom() - self.height() + 1))
+        self.move(x, y)
+        app = QtWidgets.QApplication.instance()
+        if app is not None and not self._filter_installed:
+            app.installEventFilter(self)
+            self._filter_installed = True
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.setFocus()
+        if style_mod.reduced_motion():
+            self._set_scale(1.0)
+        else:
+            self._set_scale(0.85)
+            anim = QtCore.QPropertyAnimation(self, b"scale", self)
+            anim.setDuration(PIE_OPEN_MS)
+            anim.setStartValue(0.85)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+            self._anim = anim
+            anim.start()
+
+    def _pick(self, index):
+        if self._closed:
+            return
+        self._closed = True
+        action = self._slices[index].action
+        self.close()
+        self.picked.emit(index)
+        if action is not None:
+            action()
+
+    def _dismiss(self):
+        if self._closed:
+            return
+        self._closed = True
+        self.close()
+        self.dismissed.emit()
+
+    def closeEvent(self, event):
+        # A close that did not come through _pick/_dismiss (the
+        # popup closed natively, or the window toggled it off) is
+        # a dismiss — exactly one outcome per open.
+        app = QtWidgets.QApplication.instance()
+        if app is not None and self._filter_installed:
+            app.removeEventFilter(self)
+            self._filter_installed = False
+        if not self._closed:
+            self._closed = True
+            self.dismissed.emit()
+        super().closeEvent(event)
+
+    def eventFilter(self, watched, event):
+        # A press anywhere but on this menu dismisses it (the
+        # outside click). The press is swallowed, so the widget
+        # under it never acts on the dismissing click — no orbit
+        # starts, no selection changes. (Qt's popup handling also
+        # closes the menu on an outside click; the filter is the
+        # path that also catches synthetic test events, which
+        # bypass the popup grab.)
+        if (event.type() == QtCore.QEvent.MouseButtonPress
+                and watched is not self):
+            self._dismiss()
+            return True
+        return super().eventFilter(watched, event)
+
+    # -- input --------------------------------------------------------
+    def mouseMoveEvent(self, event):
+        idx = self._slice_at(event.position().toPoint())
+        if idx != self._hover:
+            self._hover = idx
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def mousePressEvent(self, event):
+        # A press outside the widget's own rect (delivered here by
+        # the popup grab) dismisses. A press in the dead zone does
+        # NOT dismiss — the menu opens centred on the cursor, so
+        # every flick starts there; the release decides the pick.
+        if event.button() != QtCore.Qt.LeftButton:
+            return
+        if not self.rect().contains(event.position().toPoint()):
+            self._dismiss()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        # The release point picks (flick semantics: press, drag in
+        # a direction, release — and a plain click is the same
+        # thing with no drag). A release in the dead zone or past
+        # the overshoot margin dismisses.
+        if event.button() != QtCore.Qt.LeftButton:
+            return
+        idx = self._slice_at(event.position().toPoint(),
+                             overshoot=True)
+        if idx is None:
+            self._dismiss()
+        else:
+            self._pick(idx)
+        super().mouseReleaseEvent(event)
+
+    def _step_hover(self, delta):
+        n = len(self._slices)
+        if self._hover is None:
+            self._hover = 0 if delta > 0 else n - 1
+        else:
+            self._hover = (self._hover + delta) % n
+        self.update()
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_Q):
+            self._dismiss()
+            return
+        if QtCore.Qt.Key_1 <= key <= QtCore.Qt.Key_8:
+            idx = key - QtCore.Qt.Key_1
+            if idx < len(self._slices):
+                self._pick(idx)
+            return
+        if key == QtCore.Qt.Key_Left:
+            self._step_hover(-1)
+            return
+        if key == QtCore.Qt.Key_Right:
+            self._step_hover(1)
+            return
+        if key == QtCore.Qt.Key_Up:
+            self._step_hover(-2)
+            return
+        if key == QtCore.Qt.Key_Down:
+            self._step_hover(2)
+            return
+        if key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter,
+                   QtCore.Qt.Key_Space):
+            if self._hover is not None:
+                self._pick(self._hover)
+            return
+        super().keyPressEvent(event)
+
+    # -- paint --------------------------------------------------------
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        painter.translate(self._centre)
+        painter.scale(self._scale, self._scale)
+        painter.translate(-self._centre)
+        span = self._span()
+        rect = QtCore.QRectF(self._centre.x() - PIE_RADIUS,
+                             self._centre.y() - PIE_RADIUS,
+                             2 * PIE_RADIUS, 2 * PIE_RADIUS)
+        # One full disc under the slices, so the gaps read as
+        # separators, not holes.
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(QtGui.QColor(style_mod.SURFACE))
+        painter.setOpacity(0.96)
+        painter.drawEllipse(self._centre, PIE_RADIUS, PIE_RADIUS)
+        painter.setOpacity(1.0)
+        for i, slice_ in enumerate(self._slices):
+            start = 90.0 - i * span - span / 2.0 + 1.0
+            sweep = span - 2.0
+            color = (style_mod.RAISED if i == self._hover
+                     else style_mod.SURFACE)
+            painter.setBrush(QtGui.QColor(color))
+            painter.drawPie(rect, int(start * 16), int(sweep * 16))
+        # Separators: the slices share one fill, so without lines
+        # the menu reads as a blank disc — one thin muted line per
+        # boundary, plus a rim so the disc reads against a dark
+        # viewport.
+        sep = QtGui.QColor(style_mod.MUTED)
+        sep.setAlpha(110)
+        painter.setPen(QtGui.QPen(sep, 1))
+        painter.setBrush(QtCore.Qt.NoBrush)
+        for i in range(len(self._slices)):
+            edge = math.radians(90.0 - i * span - span / 2.0)
+            painter.drawLine(
+                QtCore.QPointF(
+                    self._centre.x()
+                    + PIE_DEAD_RADIUS * math.cos(edge),
+                    self._centre.y()
+                    - PIE_DEAD_RADIUS * math.sin(edge)),
+                QtCore.QPointF(
+                    self._centre.x()
+                    + (PIE_RADIUS - 1) * math.cos(edge),
+                    self._centre.y()
+                    - (PIE_RADIUS - 1) * math.sin(edge)))
+        painter.drawEllipse(self._centre, PIE_RADIUS - 1,
+                            PIE_RADIUS - 1)
+        # Dead zone: a ringed circle in the middle.
+        painter.setBrush(QtGui.QColor(style_mod.SURFACE))
+        painter.setPen(QtGui.QPen(QtGui.QColor(style_mod.MUTED), 1))
+        painter.drawEllipse(self._centre, PIE_DEAD_RADIUS,
+                            PIE_DEAD_RADIUS)
+        # Labels (+ swatches, when a slice carries one).
+        painter.setPen(QtGui.QColor(style_mod.TEXT))
+        font = painter.font()
+        font.setPointSize(9)
+        painter.setFont(font)
+        metrics = QtGui.QFontMetrics(font)
+        mid_r = (PIE_DEAD_RADIUS + PIE_RADIUS) / 2.0
+        chord = 2 * mid_r * math.sin(math.radians(span / 2.0))
+        for i, slice_ in enumerate(self._slices):
+            point = self.slice_point(i)
+            if slice_.swatch is not None:
+                # A swatch chip (PO6) sits at the slice point and
+                # the label drops below it.
+                if isinstance(slice_.swatch, QtGui.QColor):
+                    painter.setBrush(slice_.swatch)
+                    painter.setPen(QtCore.Qt.NoPen)
+                    painter.drawEllipse(point, 8, 8)
+                    painter.setPen(QtGui.QColor(style_mod.TEXT))
+                elif isinstance(slice_.swatch, QtGui.QPixmap):
+                    painter.drawPixmap(
+                        point.x() - 8, point.y() - 8, 16, 16,
+                        slice_.swatch)
+                point = QtCore.QPoint(point.x(), point.y() + 18)
+            text = metrics.elidedText(slice_.label,
+                                      QtCore.Qt.ElideRight,
+                                      int(chord) - 4)
+            text_rect = metrics.boundingRect(text)
+            painter.drawText(point.x() - text_rect.width() // 2,
+                             point.y() + text_rect.height() // 2 - 2,
+                             text)
+        # Centre text (PO6's knob readout; UI9 leaves it empty).
+        if self.centre_text:
+            painter.setPen(QtGui.QColor(style_mod.MUTED))
+            small = painter.font()
+            small.setPointSize(8)
+            painter.setFont(small)
+            text_rect = QtGui.QFontMetrics(small).boundingRect(
+                self.centre_text)
+            painter.drawText(
+                self._centre.x() - text_rect.width() // 2,
+                self._centre.y() + text_rect.height() // 2,
+                self.centre_text)

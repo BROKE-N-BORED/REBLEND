@@ -8790,9 +8790,22 @@ class QtWindowFitTests(unittest.TestCase):
                 "time.sleep(30)\n")
         proc = subprocess.Popen([sys.executable, "-c", code, path])
         try:
+            # Wait for the lock file AND its full contents: QLockFile
+            # creates the file before writing the pid into it, and a
+            # partial lock file is treated as held, not stale (probed:
+            # an empty or partial lock file makes tryLock return
+            # False) — so killing the instant the file appears can
+            # leave a lock no takeover can claim. The full content
+            # is five newline-terminated lines.
             for _ in range(100):
-                if os.path.exists(path) or proc.poll() is not None:
+                if proc.poll() is not None:
                     break
+                try:
+                    with open(path) as fh:
+                        if fh.read().count("\n") >= 5:
+                            break
+                except OSError:
+                    pass
                 time.sleep(0.05)
             self.assertTrue(os.path.exists(path),
                             "the locker subprocess never took the lock")
@@ -12789,6 +12802,313 @@ class QtMaterialWearTests(unittest.TestCase):
             self.assertGreaterEqual(top_left.x(), 0, widget)
             self.assertLessEqual(bottom_right.x(), viewport_width,
                                  widget)
+        window.close()
+
+
+@unittest.skipUnless(QT_TESTS, "Qt tests need LIGHT_ENGINE_QT_TESTS=1")
+class QtPieMenuTests(unittest.TestCase):
+    """UI9: the pie menu in the viewport — Q opens it at the cursor,
+    a click or a flick or a number key picks, arrow keys navigate,
+    Esc / Q / a click outside dismisses without picking, and a
+    no-pick close changes no pixel and no undo step."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6 import QtWidgets
+        cls._app = QtWidgets.QApplication.instance()
+        if cls._app is None:
+            cls._app = QtWidgets.QApplication([])
+        from light_engine import window as window_mod
+        from light_engine.viewport import PieMenu, PieSlice
+        cls.MainWindow = window_mod.MainWindow
+        cls.PieMenu = PieMenu
+        cls.PieSlice = PieSlice
+
+    def setUp(self):
+        # The appear animation never runs in tests — the menu is at
+        # full scale the moment it opens.
+        style_mod.set_reduced_motion_override(True)
+
+    def tearDown(self):
+        style_mod.set_reduced_motion_override(None)
+
+    def _pump(self, rounds=10):
+        from PySide6 import QtCore, QtWidgets
+        for _ in range(rounds):
+            QtWidgets.QApplication.processEvents()
+            QtCore.QThread.msleep(50)
+
+    def _show(self, window):
+        window.resize(1280, 800)
+        window.show()
+        self._pump()
+
+    def _open_window(self, scene=None):
+        window = self.MainWindow(scene=scene)
+        self._show(window)
+        return window
+
+    def _open_tavern(self):
+        scene = scene_mod.load_scene(str(EXAMPLE))
+        return self._open_window(scene=scene)
+
+    def _cursor_to(self, widget, point):
+        # QTest.mouseMove is a no-op when the pointer is already at
+        # the target — move away first (the C19 helper's shape).
+        from PySide6 import QtCore, QtTest
+        QtTest.QTest.mouseMove(widget, QtCore.QPoint(5, 5))
+        self._pump(rounds=2)
+        QtTest.QTest.mouseMove(widget, point)
+        self._pump(rounds=2)
+
+    def _focus_viewport(self, window):
+        # Xvfb has no window manager, so show() never activates the
+        # window and setFocus() is a no-op until it is active (the
+        # C3 shortcut test's pattern).
+        window.activateWindow()
+        window._viewport.setFocus()
+        self._pump(rounds=5)
+
+    def _open_pie(self, window, at=None):
+        from PySide6 import QtCore
+        vp = window._viewport
+        if at is None:
+            at = QtCore.QPoint(vp.width() // 2, vp.height() // 2)
+        self._cursor_to(vp, at)
+        self._focus_viewport(window)
+        window._open_pie_menu()
+        self._pump(rounds=4)
+        return window._pie_menu
+
+    def _render_bytes(self, window, tmp):
+        path = os.path.join(tmp, "frame.png")
+        window.render_frame_to(0, path)
+        with open(path, "rb") as fh:
+            return fh.read()
+
+    def test_nine_slices_rejected_and_eight_allowed(self):
+        # Entry 016's cap, enforced at construction: past eight
+        # slices the flick becomes a hunt again.
+        PieMenu = self.PieMenu
+        PieSlice = self.PieSlice
+        with self.assertRaises(ValueError):
+            PieMenu([PieSlice(str(i)) for i in range(9)])
+        with self.assertRaises(ValueError):
+            PieMenu([])
+        menu = PieMenu([PieSlice(str(i)) for i in range(8)])
+        self.assertEqual(len(menu._slices), 8)
+        menu.close()
+
+    def test_slice_points_cover_the_compass(self):
+        # Every slice point maps back to its own index; the centre
+        # (dead zone) and a corner map to no slice.
+        from PySide6 import QtCore
+        menu = self.PieMenu([self.PieSlice(str(i))
+                             for i in range(8)])
+        for i in range(8):
+            self.assertEqual(menu._slice_at(menu.slice_point(i)), i)
+        self.assertIsNone(menu._slice_at(menu.rect().center()))
+        self.assertIsNone(menu._slice_at(QtCore.QPoint(0, 0)))
+        menu.close()
+
+    def test_q_opens_menu_at_cursor(self):
+        from PySide6 import QtCore, QtGui
+        from PySide6.QtTest import QTest
+        window = self._open_window()
+        vp = window._viewport
+        self._cursor_to(vp, QtCore.QPoint(vp.width() // 2,
+                                          vp.height() // 2))
+        self._focus_viewport(window)
+        QTest.keyClick(vp, QtCore.Qt.Key_Q)
+        self._pump(rounds=4)
+        menu = window._pie_menu
+        self.assertIsNotNone(menu)
+        self.assertTrue(menu.isVisible())
+        # Centred on the cursor (within a pixel of integer
+        # rounding), fully inside the viewport.
+        cursor = QtGui.QCursor.pos()
+        centre = menu.mapToGlobal(menu.rect().center())
+        self.assertLessEqual(abs(centre.x() - cursor.x()), 1)
+        self.assertLessEqual(abs(centre.y() - cursor.y()), 1)
+        vp_rect = QtCore.QRect(vp.mapToGlobal(QtCore.QPoint(0, 0)),
+                               vp.size())
+        self.assertTrue(vp_rect.contains(menu.geometry()))
+        window.close()
+
+    def test_click_picks_gizmo_mode(self):
+        from PySide6 import QtCore
+        from PySide6.QtTest import QTest
+        window = self._open_window()
+        menu = self._open_pie(window)
+        # Slice 1 is Rotate; the pick runs the toolbar's own code
+        # path, so the button reflects it too.
+        QTest.mouseClick(menu, QtCore.Qt.LeftButton,
+                         pos=menu.slice_point(1))
+        self._pump(rounds=4)
+        self.assertFalse(menu.isVisible())
+        self.assertEqual(window._viewport.gizmo_mode, "rotate")
+        self.assertTrue(window._gizmo_buttons["rotate"].isChecked())
+        window.close()
+
+    def test_flick_picks(self):
+        # Press in the dead zone (where the menu opened, under the
+        # cursor), drag out to the Box slice, release: the release
+        # point picks.
+        from PySide6 import QtCore
+        from PySide6.QtTest import QTest
+        window = self._open_window()
+        before = len(window.scene["objects"])
+        undo_before = len(window._undo_stack)
+        menu = self._open_pie(window)
+        QTest.mousePress(menu, QtCore.Qt.LeftButton,
+                         pos=menu.rect().center())
+        QTest.mouseMove(menu, menu.slice_point(3))
+        QTest.mouseRelease(menu, QtCore.Qt.LeftButton,
+                           pos=menu.slice_point(3))
+        self._pump(rounds=4)
+        self.assertFalse(menu.isVisible())
+        self.assertEqual(len(window.scene["objects"]), before + 1)
+        self.assertEqual(window.scene["objects"][-1]["shape"], "box")
+        self.assertEqual(len(window._undo_stack), undo_before + 1)
+        window.close()
+
+    def test_number_key_picks(self):
+        # Key 5 is the fifth slice (Sphere); a pick adds the object
+        # through the Add panel's own code path, one undo step.
+        from PySide6 import QtCore
+        from PySide6.QtTest import QTest
+        window = self._open_window()
+        before = len(window.scene["objects"])
+        undo_before = len(window._undo_stack)
+        menu = self._open_pie(window)
+        QTest.keyClick(menu, QtCore.Qt.Key_5)
+        self._pump(rounds=4)
+        self.assertFalse(menu.isVisible())
+        self.assertEqual(len(window.scene["objects"]), before + 1)
+        self.assertEqual(window.scene["objects"][-1]["shape"],
+                         "sphere")
+        self.assertEqual(window.scene["objects"][-1]["id"],
+                         window.selected_id)
+        self.assertEqual(len(window._undo_stack), undo_before + 1)
+        window.close()
+
+    def test_escape_closes_without_pick(self):
+        from PySide6 import QtCore
+        from PySide6.QtTest import QTest
+        window = self._open_tavern()
+        before = scene_mod.scene_copy(window.scene)
+        undo_before = len(window._undo_stack)
+        menu = self._open_pie(window)
+        QTest.keyClick(menu, QtCore.Qt.Key_Escape)
+        self._pump(rounds=4)
+        self.assertFalse(menu.isVisible())
+        self.assertEqual(window.scene, before)
+        self.assertEqual(len(window._undo_stack), undo_before)
+        window.close()
+
+    def test_q_again_closes_without_pick(self):
+        from PySide6 import QtCore
+        from PySide6.QtTest import QTest
+        window = self._open_tavern()
+        before = scene_mod.scene_copy(window.scene)
+        menu = self._open_pie(window)
+        QTest.keyClick(menu, QtCore.Qt.Key_Q)
+        self._pump(rounds=4)
+        self.assertFalse(menu.isVisible())
+        self.assertEqual(window.scene, before)
+        window.close()
+
+    def test_click_outside_closes_without_pick(self):
+        # The dismissing click is swallowed: the viewport never
+        # sees it, so no orbit starts and no selection changes.
+        from PySide6 import QtCore
+        from PySide6.QtTest import QTest
+        window = self._open_tavern()
+        window._select("mug")
+        before = scene_mod.scene_copy(window.scene)
+        undo_before = len(window._undo_stack)
+        menu = self._open_pie(window)
+        self.assertTrue(menu.isVisible())
+        QTest.mouseClick(window._viewport, QtCore.Qt.LeftButton,
+                         pos=QtCore.QPoint(10, 10))
+        self._pump(rounds=4)
+        self.assertFalse(menu.isVisible())
+        self.assertEqual(window.scene, before)
+        self.assertEqual(len(window._undo_stack), undo_before)
+        self.assertEqual(window.selected_id, "mug")
+        window.close()
+
+    def test_no_pick_close_changes_no_pixel(self):
+        # Open + Esc: the render is byte-identical, the camera is
+        # untouched, and the undo stack is untouched.
+        window = self._open_tavern()
+        vp = window._viewport
+        camera = (vp.target, vp.distance, vp.azimuth, vp.elevation)
+        undo_before = len(window._undo_stack)
+        with tempfile.TemporaryDirectory() as tmp:
+            first = self._render_bytes(window, tmp)
+            menu = self._open_pie(window)
+            from PySide6 import QtCore
+            from PySide6.QtTest import QTest
+            QTest.keyClick(menu, QtCore.Qt.Key_Escape)
+            self._pump(rounds=4)
+            self.assertEqual(self._render_bytes(window, tmp), first)
+        self.assertEqual((vp.target, vp.distance, vp.azimuth,
+                          vp.elevation), camera)
+        self.assertEqual(len(window._undo_stack), undo_before)
+        window.close()
+
+    def test_menu_clamps_to_viewport(self):
+        # Cursor in the viewport's top-left corner: the menu still
+        # lands fully inside the viewport, not half off the edge.
+        from PySide6 import QtCore
+        window = self._open_window()
+        vp = window._viewport
+        menu = self._open_pie(window, at=QtCore.QPoint(5, 5))
+        vp_rect = QtCore.QRect(vp.mapToGlobal(QtCore.QPoint(0, 0)),
+                               vp.size())
+        self.assertTrue(vp_rect.contains(menu.geometry()))
+        menu.close()
+        window.close()
+
+    def test_arrow_keys_navigate_and_enter_picks(self):
+        from PySide6 import QtCore
+        from PySide6.QtTest import QTest
+        window = self._open_window()
+        menu = self._open_pie(window)
+        QTest.keyClick(menu, QtCore.Qt.Key_Right)
+        self.assertEqual(menu._hover, 0)
+        QTest.keyClick(menu, QtCore.Qt.Key_Right)
+        self.assertEqual(menu._hover, 1)
+        QTest.keyClick(menu, QtCore.Qt.Key_Return)
+        self._pump(rounds=4)
+        self.assertFalse(menu.isVisible())
+        self.assertEqual(window._viewport.gizmo_mode, "rotate")
+        window.close()
+
+    def test_reduced_motion_opens_at_full_scale(self):
+        # With reduced motion on (setUp forces it), there is no
+        # appear animation: full scale the moment it opens.
+        window = self._open_window()
+        menu = self._open_pie(window)
+        self.assertEqual(menu._scale, 1.0)
+        self.assertIsNone(menu._anim)
+        menu.close()
+        window.close()
+
+    def test_shortcuts_work_after_close(self):
+        # Focus returns to the viewport on dismiss, so W/E/R keep
+        # working without the user clicking back into the viewport.
+        from PySide6 import QtCore
+        from PySide6.QtTest import QTest
+        window = self._open_window()
+        vp = window._viewport
+        menu = self._open_pie(window)
+        QTest.keyClick(menu, QtCore.Qt.Key_Escape)
+        self._pump(rounds=4)
+        self.assertFalse(menu.isVisible())
+        QTest.keyClick(vp, QtCore.Qt.Key_E)
+        self.assertEqual(vp.gizmo_mode, "rotate")
         window.close()
 
 
