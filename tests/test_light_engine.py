@@ -1122,6 +1122,195 @@ class MaterialLayoutsTests(unittest.TestCase):
                 self.assertLessEqual(default, row["high"], row)
 
 
+class MaterialWearTests(unittest.TestCase):
+    """PO5, headless: weather and age — the registry, the
+    wear-for-style rule, the merge/uniform packing, tolerant
+    load, round-trip, and the shader gate."""
+
+    def test_wear_registry_coverage(self):
+        # Every style's wear is in the vocabulary, and every
+        # wear type is used by at least one style — a wear type
+        # no style takes is dead data.
+        used = set()
+        for style, entry in textures.STYLES.items():
+            self.assertTrue(entry["wear"], style)
+            self.assertLessEqual(set(entry["wear"]),
+                                 set(textures.WEAR_TYPES), style)
+            used.update(entry["wear"])
+        self.assertEqual(used, set(textures.WEAR_TYPES))
+        # Cracks only where stone or concrete can crack; rust
+        # only on metals.
+        cracked = {s for s, e in textures.STYLES.items()
+                   if "cracks" in e["wear"]}
+        self.assertEqual(cracked,
+                         {"stone_granite", "stone_limestone",
+                          "stone_marble_carrara", "stone_slate",
+                          "brick_stretcher", "concrete_raw",
+                          "concrete_aged"})
+        rusted = {s for s, e in textures.STYLES.items()
+                  if "rust" in e["wear"]}
+        self.assertEqual(rusted,
+                         {"metal_brushed", "metal_rusted",
+                          "metal_galvanised"})
+        # Every wear type has exactly one UI row, and every row's
+        # help key exists and reads plain.
+        from light_engine import inspector_data as inspector_mod
+        self.assertEqual(set(inspector_mod.WEAR_UI),
+                         set(textures.WEAR_TYPES))
+        for key, row in inspector_mod.WEAR_UI.items():
+            self.assertEqual(set(row),
+                             {"key", "label", "kind", "low", "high",
+                              "step", "decimals", "help"}, row)
+            self.assertEqual(row["key"], key, row)
+            self.assertLess(row["low"], row["high"], row)
+            self.assertGreater(row["step"], 0, row)
+            self.assertIn(row["help"], inspector_mod.FIELD_HELP, row)
+            self.assertNotIn("\u2014", row["label"], row)
+            self.assertNotIn("&", row["label"], row)
+            text = inspector_mod.FIELD_HELP[row["help"]]
+            self.assertTrue(text.endswith("."), text)
+            self.assertNotIn("\u2014", text, text)
+            self.assertNotIn("&", text, text)
+        # Percents run 0-100; cracks is a spacing in cm, 0 off.
+        for key in ("dirt", "grime", "edge_wear", "rust", "moss",
+                    "wetness"):
+            row = inspector_mod.WEAR_UI[key]
+            self.assertEqual(row["kind"], "percent", row)
+            self.assertEqual((row["low"], row["high"]),
+                             (0.0, 100.0), row)
+        cracks = inspector_mod.WEAR_UI["cracks"]
+        self.assertEqual(cracks["kind"], "cracks_cm")
+        self.assertEqual((cracks["low"], cracks["high"]),
+                         (0.0, 40.0))
+
+    def test_wear_for_style(self):
+        self.assertEqual(textures.wear_for_style("wood_cathedral"),
+                         ["dirt", "grime", "edge_wear", "moss",
+                          "wetness"])
+        self.assertEqual(textures.wear_for_style("stone_granite"),
+                         ["dirt", "grime", "edge_wear", "moss",
+                          "cracks", "wetness"])
+        self.assertEqual(textures.wear_for_style("metal_brushed"),
+                         ["dirt", "grime", "edge_wear", "rust",
+                          "wetness"])
+        self.assertEqual(textures.wear_for_style("fabric_canvas"),
+                         ["dirt", "grime", "wetness"])
+        self.assertEqual(textures.wear_for_style("ground_soil"),
+                         ["dirt", "grime", "moss", "wetness"])
+        # A style-less material takes the generic set — wear
+        # overlays any material, even a plain colour.
+        self.assertEqual(textures.wear_for_style("none"),
+                         list(textures.GENERIC_WEAR))
+        self.assertEqual(textures.wear_for_style("bogus"),
+                         list(textures.GENERIC_WEAR))
+
+    def test_merged_wear(self):
+        # Defaults: every wear type the style takes, at 0.
+        self.assertEqual(textures.merged_wear("wood_cathedral"),
+                         {"dirt": 0.0, "grime": 0.0, "edge_wear": 0.0,
+                          "moss": 0.0, "wetness": 0.0})
+        # Overrides merge over the defaults, per key.
+        self.assertEqual(textures.merged_wear(
+            "wood_cathedral", {"dirt": 50}),
+            {"dirt": 50.0, "grime": 0.0, "edge_wear": 0.0,
+             "moss": 0.0, "wetness": 0.0})
+        # Wear the style does not take is dropped — a stored
+        # rust value must not follow the material onto wood.
+        self.assertNotIn("rust", textures.merged_wear(
+            "wood_cathedral", {"rust": 80}))
+        self.assertNotIn("cracks", textures.merged_wear(
+            "metal_brushed", {"cracks": 20}))
+        # Unknown keys, non-numbers, and bools are dropped;
+        # percents clamp to 0-100, cracks to 0-100.
+        self.assertEqual(textures.merged_wear(
+            "stone_granite",
+            {"dirt": 150, "moss": -5, "cracks": 120,
+             "bogus": 1.0, "grime": "filthy", "wetness": True}),
+            {"dirt": 100.0, "grime": 0.0, "edge_wear": 0.0,
+             "moss": 0.0, "cracks": 100.0, "wetness": 0.0})
+        self.assertEqual(textures.merged_wear("wood_cathedral",
+                                              "filthy"),
+                         {"dirt": 0.0, "grime": 0.0, "edge_wear": 0.0,
+                          "moss": 0.0, "wetness": 0.0})
+
+    def test_wear_uniforms(self):
+        # The packing is the contract with the fragment shader:
+        # uWearA is (dirt, grime, edge wear, rust) as 0-1
+        # fractions, uWearB is (moss, wetness, crack spacing).
+        wear_a, wear_b = textures.wear_uniforms(
+            "stone_granite", {"dirt": 50, "grime": 25,
+                              "edge_wear": 100, "moss": 75,
+                              "wetness": 10, "cracks": 20.0})
+        self.assertEqual(wear_a, (0.5, 0.25, 1.0, 0.0))
+        self.assertEqual(wear_b, (0.75, 0.1, 20.0))
+        # All zero in, all zero out — the shader gate's off state.
+        self.assertEqual(textures.wear_uniforms("wood_cathedral"),
+                         ((0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0)))
+        self.assertEqual(
+            textures.wear_uniforms("metal_brushed", {"rust": 100}),
+            ((0.0, 0.0, 0.0, 1.0), (0.0, 0.0, 0.0)))
+
+    def test_default_material_wear_tolerant(self):
+        # Missing: clean and dry (old scenes carry no wear key).
+        mat = scene_mod.default_material({})
+        self.assertEqual(mat["wear"], {})
+        # Numbers kept as floats, non-numbers dropped, unknown
+        # keys kept (a newer Reblend may use them).
+        mat = scene_mod.default_material(
+            {"wear": {"dirt": 50, "bad": "filthy", "bool": True,
+                      "none": None, "future": 1.5}})
+        self.assertEqual(mat["wear"],
+                         {"dirt": 50.0, "future": 1.5})
+        mat = scene_mod.default_material({"wear": "filthy"})
+        self.assertEqual(mat["wear"], {})
+        # Every call gets a fresh dict: MATERIAL_DEFAULTS holds
+        # one shared {} and a shallow copy must never leak it
+        # into two materials.
+        first = scene_mod.default_material()
+        second = scene_mod.default_material()
+        self.assertIsNot(first["wear"], second["wear"])
+        first["wear"]["dirt"] = 50.0
+        self.assertEqual(second["wear"], {})
+
+    def test_wear_round_trips_through_save_load(self):
+        scene = scene_mod.new_scene("wear")
+        obj = scene_mod.new_object(
+            "box", material={"style": "wood_cathedral",
+                             "wear": {"dirt": 50.0, "moss": 25.0}})
+        scene["objects"].append(obj)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "scene.json")
+            scene_mod.save_scene(scene, path)
+            loaded = scene_mod.load_scene(path)
+        mat = loaded["objects"][0]["material"]
+        self.assertEqual(mat["style"], "wood_cathedral")
+        self.assertEqual(mat["wear"], {"dirt": 50.0, "moss": 25.0})
+
+    def test_old_scene_loads_clean_and_dry(self):
+        # The tavern file carries no wear key anywhere: every
+        # material loads with empty wear — and renders exactly
+        # as before PO5.
+        scene = scene_mod.load_scene(str(EXAMPLE))
+        for obj in scene["objects"]:
+            self.assertEqual(obj["material"]["wear"], {},
+                             obj["name"])
+
+    def test_shader_wear_gate(self):
+        # The fragment shader declares the wear uniforms, the
+        # overlay function, and the gate that skips the block
+        # when every wear value is 0 — the structural reason wear
+        # at 0% changes no pixel.
+        _vert, frag = shaders.PROGRAMS["pbr_lite"]
+        self.assertIn("uniform vec4 uWearA;", frag)
+        self.assertIn("uniform vec3 uWearB;", frag)
+        self.assertIn("void applyWear(inout vec3 albedo, "
+                      "inout float roughness, vec3 N)", frag)
+        self.assertIn("float wearAmount = dot(uWearA, vec4(1.0))",
+                      frag)
+        self.assertIn("if (wearAmount > 0.0) {", frag)
+        self.assertIn("applyWear(albedo, roughness, N);", frag)
+
+
 class FileIOTests(unittest.TestCase):
     def test_example_scene_loads_and_is_light(self):
         self.assertTrue(EXAMPLE.exists(), "example scene missing")
@@ -1165,7 +1354,8 @@ class ShaderSourceTests(unittest.TestCase):
         for uniform in ("uBaseColor", "uRoughness", "uMetalness", "uTex",
                         "uUseTexture", "uAmbient", "uLightPos[3]",
                         "uLightColor[3]", "uViewPos", "uExposure",
-                        "uShadowMap", "uUseShadow"):
+                        "uShadowMap", "uUseShadow", "uLayoutMode",
+                        "uLayoutSize", "uWearA", "uWearB"):
             self.assertIn(uniform, frag, uniform)
 
     def test_lines_and_points_have_their_uniforms(self):
@@ -7513,7 +7703,10 @@ class InspectorTextTests(unittest.TestCase):
                     "layout", "layout_board_width",
                     "layout_board_length", "layout_strip_width",
                     "layout_block_size", "layout_square_size",
-                    "layout_slab_width", "layout_slab_length"}
+                    "layout_slab_width", "layout_slab_length",
+                    "wear_dirt", "wear_grime", "wear_edge_wear",
+                    "wear_rust", "wear_moss", "wear_wetness",
+                    "wear_cracks"}
         self.assertEqual(set(inspector_mod.FIELD_HELP), expected)
         for key, line in inspector_mod.FIELD_HELP.items():
             self.assertTrue(line, key)
@@ -7733,6 +7926,11 @@ class QtInspectorTests(unittest.TestCase):
                 # rows only for the layout actually picked. They
                 # are checked per style below.
                 continue
+            if key.startswith("wear_"):
+                # PO5: the wear help lines are contextual — the
+                # Life rows only exist in Advanced, per style.
+                # They are checked per style below.
+                continue
             self.assertIn(text, labels, key)
             self.assertTrue(labels[text].isVisible(), key)
         # PO2: every style's knobs explain themselves while shown.
@@ -7771,6 +7969,15 @@ class QtInspectorTests(unittest.TestCase):
                         self.assertIn(text, labels, row["help"])
                         self.assertTrue(labels[text].isVisible(),
                                         row["help"])
+            # PO5: the wear rows explain themselves while shown.
+            # Every style takes some wear, so the Life rows are
+            # there in Advanced whatever the layout.
+            labels = {lbl.text(): lbl for lbl in
+                      window.findChildren(QtWidgets.QLabel)}
+            for row in inspector_mod.wear_rows_for(style):
+                text = inspector_mod.FIELD_HELP[row["help"]]
+                self.assertIn(text, labels, row["help"])
+                self.assertTrue(labels[text].isVisible(), row["help"])
         window._select(emitter["id"])
         labels = {lbl.text(): lbl for lbl in
                   window.findChildren(QtWidgets.QLabel)}
@@ -11146,11 +11353,11 @@ class QtMaterialPreviewTests(unittest.TestCase):
             self._hover(window, combo, "wood_cathedral",
                         ("mug", {"texture": "wood_cathedral",
                                  "style": "wood_cathedral",
-                                 "params": {}}))
+                                 "params": {}, "wear": {}}))
             self.assertEqual(window._viewport._material_preview,
                              ("mug", {"texture": "wood_cathedral",
                                       "style": "wood_cathedral",
-                                      "params": {}}))
+                                      "params": {}, "wear": {}}))
             self.assertEqual(self._material(window)["texture"], "none")
             self.assertNotEqual(self._render_bytes(window, tmp), before)
             combo.hidePopup()
@@ -11332,11 +11539,11 @@ class QtMaterialLibraryTests(unittest.TestCase):
         self._hover(window, combo, "stone_granite",
                     ("mug", {"texture": "stone_granite",
                              "style": "stone_granite",
-                             "params": {}}))
+                             "params": {}, "wear": {}}))
         self.assertEqual(window._viewport._material_preview,
                          ("mug", {"texture": "stone_granite",
                                   "style": "stone_granite",
-                                  "params": {}}))
+                                  "params": {}, "wear": {}}))
         # A family header carries no data: highlighting it ends
         # the preview (called directly — Qt does not reliably
         # fire the highlight signal for a disabled item under a
@@ -11368,6 +11575,24 @@ class QtMaterialLibraryTests(unittest.TestCase):
                                     renders[styles[j]],
                                     (styles[i], styles[j]))
         window.close()
+
+
+def _param_row_labels(window):
+    # The row labels of _param_rows in order: knob labels, the
+    # Layout label, the layout size labels, then (Advanced only)
+    # the Life label and the wear labels. Help lines are word-
+    # wrapped; row labels are not, which is what tells them
+    # apart. The old stride-3 sampling broke when PO5 added the
+    # lone Life header — it shifts the phase after it, so the
+    # sampler picked up help lines instead of wear labels.
+    from PySide6 import QtWidgets
+    labels = []
+    for i in range(window._param_layout.count()):
+        widget = window._param_layout.itemAt(i).widget()
+        if (isinstance(widget, QtWidgets.QLabel)
+                and not widget.wordWrap()):
+            labels.append(widget.text())
+    return labels
 
 
 @unittest.skipUnless(QT_TESTS, "Qt tests need LIGHT_ENGINE_QT_TESTS=1")
@@ -11462,8 +11687,7 @@ class QtMaterialParamsTests(unittest.TestCase):
         # PO3: Simple (the default) shows only the simple knobs.
         self.assertEqual(set(window._param_spins),
                          {"rings", "strength"})
-        labels = [window._param_layout.itemAt(i).widget().text()
-                  for i in range(0, window._param_layout.count(), 3)]
+        labels = _param_row_labels(window)
         self.assertEqual(labels, ["Ring spacing", "Grain strength"])
         # The defaults display in the knobs' own units: 14 rings
         # across a one-metre tile is 7.1 cm apart.
@@ -11477,10 +11701,11 @@ class QtMaterialParamsTests(unittest.TestCase):
         self._pump()
         self.assertEqual(set(window._param_spins),
                          {"rings", "strength", "wobble"})
-        labels = [window._param_layout.itemAt(i).widget().text()
-                  for i in range(0, window._param_layout.count(), 3)]
+        labels = _param_row_labels(window)
         self.assertEqual(labels, ["Ring spacing", "Grain strength",
-                                  "Ring wobble", "Layout"])
+                                  "Ring wobble", "Layout", "Life",
+                                  "Dirt", "Grime", "Edge wear",
+                                  "Moss", "Wetness"])
         self.assertEqual(window._param_spins["wobble"].value(), 3.0)
         # Back to Simple: wobble's row goes, the others stay.
         window._material_advanced_check.setChecked(False)
@@ -11490,22 +11715,29 @@ class QtMaterialParamsTests(unittest.TestCase):
         self._pick_style(window, "brick_stretcher")
         self.assertEqual(set(window._param_spins),
                          {"cols", "rows", "mortar"})
-        labels = [window._param_layout.itemAt(i).widget().text()
-                  for i in range(0, window._param_layout.count(), 3)]
+        labels = _param_row_labels(window)
         self.assertEqual(labels, ["Brick length", "Course height",
                                   "Mortar width"])
         window._material_advanced_check.setChecked(True)
         self._pump()
         self.assertEqual(set(window._param_spins),
                          {"cols", "rows", "mortar", "variation"})
-        labels = [window._param_layout.itemAt(i).widget().text()
-                  for i in range(0, window._param_layout.count(), 3)]
+        labels = _param_row_labels(window)
         self.assertEqual(labels, ["Brick length", "Course height",
                                   "Mortar width", "Tone variation",
-                                  "Layout"])
+                                  "Layout", "Life", "Dirt", "Grime",
+                                  "Edge wear", "Moss", "Crack spacing",
+                                  "Wetness"])
         self._pick_style(window, "none")
         self.assertEqual(window._param_spins, {})
-        self.assertEqual(window._param_layout.count(), 0)
+        # Advanced is still on, so the style-less material keeps
+        # its generic wear rows (PO5: wear applies to any
+        # material, styled or not) — the Life label plus five
+        # rows of three widgets.
+        self.assertEqual(_param_row_labels(window),
+                         ["Life", "Dirt", "Grime", "Edge wear",
+                          "Moss", "Wetness"])
+        self.assertEqual(window._param_layout.count(), 16)
         window.close()
 
     def test_ring_spacing_renders_differently(self):
@@ -11647,11 +11879,11 @@ class QtMaterialParamsTests(unittest.TestCase):
             self._hover(window, combo, "brick_stretcher",
                         ("mug", {"texture": "brick_stretcher",
                                  "style": "brick_stretcher",
-                                 "params": {}}))
+                                 "params": {}, "wear": {}}))
             self.assertEqual(window._viewport._material_preview,
                              ("mug", {"texture": "brick_stretcher",
                                       "style": "brick_stretcher",
-                                      "params": {}}))
+                                      "params": {}, "wear": {}}))
             self.assertNotEqual(self._render_bytes(window, tmp), before)
             combo.hidePopup()
             self._pump(rounds=4)
@@ -11891,11 +12123,11 @@ class QtMaterialSimpleAdvancedTests(unittest.TestCase):
             self._hover(window, combo, "brick_stretcher",
                         ("mug", {"texture": "brick_stretcher",
                                  "style": "brick_stretcher",
-                                 "params": {}}))
+                                 "params": {}, "wear": {}}))
             self.assertEqual(window._viewport._material_preview,
                              ("mug", {"texture": "brick_stretcher",
                                       "style": "brick_stretcher",
-                                      "params": {}}))
+                                      "params": {}, "wear": {}}))
             self.assertNotEqual(self._render_bytes(window, tmp), before)
             combo.hidePopup()
             self._pump(rounds=4)
@@ -11906,11 +12138,11 @@ class QtMaterialSimpleAdvancedTests(unittest.TestCase):
             self._hover(window, combo, "stone_marble_carrara",
                         ("mug", {"texture": "stone_marble_carrara",
                                  "style": "stone_marble_carrara",
-                                 "params": {}}))
+                                 "params": {}, "wear": {}}))
             self.assertEqual(window._viewport._material_preview,
                              ("mug", {"texture": "stone_marble_carrara",
                                       "style": "stone_marble_carrara",
-                                      "params": {}}))
+                                      "params": {}, "wear": {}}))
             self.assertNotEqual(self._render_bytes(window, tmp), before)
             combo.hidePopup()
             self._pump(rounds=4)
@@ -12042,10 +12274,11 @@ class QtMaterialLayoutTests(unittest.TestCase):
         self.assertEqual(combo.currentData(), "solid")
         # Solid has no pieces, so no size rows follow the picker.
         self.assertEqual(window._layout_spins, {})
-        labels = [window._param_layout.itemAt(i).widget().text()
-                  for i in range(0, window._param_layout.count(), 3)]
+        labels = _param_row_labels(window)
         self.assertEqual(labels, ["Ring spacing", "Grain strength",
-                                  "Ring wobble", "Layout"])
+                                  "Ring wobble", "Layout", "Life",
+                                  "Dirt", "Grime", "Edge wear",
+                                  "Moss", "Wetness"])
         window.close()
 
     def test_layout_pick_applies_and_undoes(self):
@@ -12065,11 +12298,12 @@ class QtMaterialLayoutTests(unittest.TestCase):
                          9.0)
         self.assertEqual(window._layout_spins["board_length"].value(),
                          54.0)
-        labels = [window._param_layout.itemAt(i).widget().text()
-                  for i in range(0, window._param_layout.count(), 3)]
+        labels = _param_row_labels(window)
         self.assertEqual(labels, ["Ring spacing", "Grain strength",
                                   "Ring wobble", "Layout",
-                                  "Board width", "Board length"])
+                                  "Board width", "Board length",
+                                  "Life", "Dirt", "Grime",
+                                  "Edge wear", "Moss", "Wetness"])
         window.undo()
         self._pump()
         self.assertEqual(self._material(window)["layout"], "solid")
@@ -12225,6 +12459,328 @@ class QtMaterialLayoutTests(unittest.TestCase):
         widgets = [window._layout_combo]
         widgets.extend(window._layout_spins.values())
         self.assertEqual(len(widgets), 3)
+        for widget in widgets:
+            top_left = scroll.viewport().mapFromGlobal(
+                widget.mapToGlobal(widget.rect().topLeft()))
+            bottom_right = scroll.viewport().mapFromGlobal(
+                widget.mapToGlobal(widget.rect().bottomRight()))
+            self.assertGreaterEqual(top_left.x(), 0, widget)
+            self.assertLessEqual(bottom_right.x(), viewport_width,
+                                 widget)
+        window.close()
+
+
+@unittest.skipUnless(QT_TESTS, "Qt tests need LIGHT_ENGINE_QT_TESTS=1")
+class QtMaterialWearTests(unittest.TestCase):
+    """PO5: weather and age — the Life rows (Advanced-only, per
+    style), one undo step per gesture, the style-pick reset,
+    save/load round-trip, the UI12 hover-preview, and renders
+    that differ (plus wear at 0% rendering identically)."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6 import QtWidgets
+        cls._app = QtWidgets.QApplication.instance()
+        if cls._app is None:
+            cls._app = QtWidgets.QApplication([])
+        from light_engine import window as window_mod
+        cls.MainWindow = window_mod.MainWindow
+
+    def _pump(self, rounds=10):
+        from PySide6 import QtCore, QtWidgets
+        for _ in range(rounds):
+            QtWidgets.QApplication.processEvents()
+            QtCore.QThread.msleep(50)
+
+    def _show(self, window):
+        window.resize(1280, 800)
+        window.show()
+        self._pump()
+
+    def _open_tavern_mug(self):
+        scene = scene_mod.load_scene(str(EXAMPLE))
+        window = self.MainWindow(scene=scene)
+        self._show(window)
+        window._select("mug")
+        return window
+
+    def _material(self, window):
+        return scene_mod.find_object(window.scene, "mug")["material"]
+
+    def _pick_style(self, window, style):
+        combo = window._texture_combo
+        combo.setCurrentIndex(combo.findData(style))
+        self._pump()
+
+    def _advanced(self, window):
+        window._material_advanced_check.setChecked(True)
+        self._pump()
+
+    def _render_bytes(self, window, tmp):
+        path = os.path.join(tmp, "frame.png")
+        window.render_frame_to(0, path)
+        with open(path, "rb") as fh:
+            return fh.read()
+
+    def _hover(self, window, combo, name, expect):
+        """Hover a popup item for real (the C19 helper's shape:
+        move off the target first, then re-move until the
+        preview lands, up to ~2 s)."""
+        from PySide6 import QtTest
+        combo.showPopup()
+        self._pump(rounds=4)
+        view = combo.view()
+        index = combo.findData(name)
+        rect = view.visualRect(view.model().index(index, 0))
+        neutral = 0 if index != 0 else 1
+        neutral_rect = view.visualRect(
+            view.model().index(neutral, 0))
+        QtTest.QTest.mouseMove(view.viewport(), neutral_rect.center())
+        self._pump(rounds=2)
+        for _ in range(10):
+            QtTest.QTest.mouseMove(view.viewport(), rect.center())
+            self._pump(rounds=2)
+            if window._viewport._material_preview == expect:
+                return
+
+    def test_wear_rows_follow_the_style(self):
+        window = self._open_tavern_mug()
+        self._advanced(window)
+        # Wood: dirt, grime, edge wear, moss, wetness — no rust,
+        # no cracks.
+        self._pick_style(window, "wood_cathedral")
+        self.assertEqual(set(window._wear_spins),
+                         {"dirt", "grime", "edge_wear", "moss",
+                          "wetness"})
+        # Stone adds cracks; metal swaps moss/cracks for rust;
+        # fabric takes only the three.
+        self._pick_style(window, "stone_granite")
+        self.assertEqual(set(window._wear_spins),
+                         {"dirt", "grime", "edge_wear", "moss",
+                          "cracks", "wetness"})
+        self.assertEqual(window._wear_spins["cracks"].maximum(), 40.0)
+        self._pick_style(window, "metal_brushed")
+        self.assertEqual(set(window._wear_spins),
+                         {"dirt", "grime", "edge_wear", "rust",
+                          "wetness"})
+        self._pick_style(window, "fabric_canvas")
+        self.assertEqual(set(window._wear_spins),
+                         {"dirt", "grime", "wetness"})
+        # A style-less material takes the generic set — wear
+        # overlays any material, even a plain colour.
+        self._pick_style(window, "none")
+        self.assertEqual(set(window._wear_spins),
+                         {"dirt", "grime", "edge_wear", "moss",
+                          "wetness"})
+        # The Life label sits above the rows, after the knobs
+        # and the layout rows.
+        self._pick_style(window, "wood_cathedral")
+        self.assertEqual(_param_row_labels(window),
+                         ["Ring spacing", "Grain strength",
+                          "Ring wobble", "Layout", "Life",
+                          "Dirt", "Grime", "Edge wear",
+                          "Moss", "Wetness"])
+        window.close()
+
+    def test_wear_rows_are_advanced_only(self):
+        window = self._open_tavern_mug()
+        # Simple shows no wear rows, even for a style with wear.
+        self._pick_style(window, "wood_cathedral")
+        self.assertEqual(window._wear_spins, {})
+        window.close()
+
+    def test_wear_spin_stores_and_prunes(self):
+        window = self._open_tavern_mug()
+        self._advanced(window)
+        self._pick_style(window, "wood_cathedral")
+        spin = window._wear_spins["dirt"]
+        spin.setValue(50.0)
+        spin.editingFinished.emit()
+        self.assertEqual(self._material(window)["wear"],
+                         {"dirt": 50.0})
+        # Back to 0: the override is pruned, not stored.
+        spin.setValue(0.0)
+        spin.editingFinished.emit()
+        self.assertEqual(self._material(window)["wear"], {})
+        window.close()
+
+    def test_wear_gesture_is_one_undo_step(self):
+        window = self._open_tavern_mug()
+        self._advanced(window)
+        self._pick_style(window, "wood_cathedral")
+        before = len(window._undo_stack)
+        spin = window._wear_spins["dirt"]
+        spin.setValue(10.0)
+        spin.setValue(30.0)
+        spin.setValue(60.0)
+        spin.editingFinished.emit()
+        # One undo step for the gesture, with the final value.
+        self.assertEqual(len(window._undo_stack), before + 1)
+        self.assertEqual(self._material(window)["wear"],
+                         {"dirt": 60.0})
+        window.undo()
+        self._pump()
+        self.assertEqual(self._material(window)["wear"], {})
+        self.assertEqual(window._wear_spins["dirt"].value(), 0.0)
+        window.close()
+
+    def test_wear_default_gesture_pushes_no_step(self):
+        window = self._open_tavern_mug()
+        self._advanced(window)
+        self._pick_style(window, "wood_cathedral")
+        before = len(window._undo_stack)
+        spin = window._wear_spins["dirt"]
+        spin.setValue(40.0)
+        spin.setValue(0.0)  # back to the default
+        spin.editingFinished.emit()
+        # A gesture that ends at the default stores nothing and
+        # pushes no step (T14).
+        self.assertEqual(len(window._undo_stack), before)
+        self.assertEqual(self._material(window)["wear"], {})
+        window.close()
+
+    def test_style_change_resets_wear(self):
+        window = self._open_tavern_mug()
+        self._advanced(window)
+        self._pick_style(window, "metal_brushed")
+        spin = window._wear_spins["rust"]
+        spin.setValue(80.0)
+        spin.editingFinished.emit()
+        self.assertEqual(self._material(window)["wear"],
+                         {"rust": 80.0})
+        before = len(window._undo_stack)
+        # Wood cannot rust: the pick clears the wear, in the
+        # pick's own undo step.
+        self._pick_style(window, "wood_cathedral")
+        self.assertEqual(self._material(window)["wear"], {})
+        self.assertEqual(len(window._undo_stack), before + 1)
+        self.assertNotIn("rust", window._wear_spins)
+        window.close()
+
+    def test_wear_round_trips_through_save_load(self):
+        window = self._open_tavern_mug()
+        self._advanced(window)
+        self._pick_style(window, "wood_cathedral")
+        spin = window._wear_spins["dirt"]
+        spin.setValue(50.0)
+        spin.editingFinished.emit()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "scene.json")
+            scene_mod.save_scene(window.scene, path)
+            loaded = scene_mod.load_scene(path)
+        window.close()
+        window2 = self.MainWindow(scene=loaded)
+        self._show(window2)
+        window2._select("mug")
+        mat = scene_mod.find_object(window2.scene, "mug")["material"]
+        self.assertEqual(mat["wear"], {"dirt": 50.0})
+        window2.close()
+
+    def test_hover_preview_pins_wear(self):
+        window = self._open_tavern_mug()
+        self._advanced(window)
+        self._pick_style(window, "wood_cathedral")
+        spin = window._wear_spins["dirt"]
+        spin.setValue(50.0)
+        spin.editingFinished.emit()
+        combo = window._texture_combo
+        with tempfile.TemporaryDirectory() as tmp:
+            before = self._render_bytes(window, tmp)
+            self._hover(window, combo, "brick_stretcher",
+                        ("mug", {"texture": "brick_stretcher",
+                                 "style": "brick_stretcher",
+                                 "params": {}, "wear": {}}))
+            self.assertEqual(window._viewport._material_preview,
+                             ("mug", {"texture": "brick_stretcher",
+                                      "style": "brick_stretcher",
+                                      "params": {}, "wear": {}}))
+            self.assertNotEqual(self._render_bytes(window, tmp),
+                                before)
+            combo.hidePopup()
+            self._pump(rounds=4)
+            self.assertIsNone(window._viewport._material_preview)
+            # Byte-identical to before the hover: the stored
+            # wear survived untouched in the scene.
+            self.assertEqual(self._render_bytes(window, tmp), before)
+            self.assertEqual(self._material(window)["wear"],
+                             {"dirt": 50.0})
+        window.close()
+
+    def test_dirt_renders_differently(self):
+        # The spec's done-when: dirt 100% vs 0% renders
+        # differently (the brightness shift is verify_po5's).
+        window = self._open_tavern_mug()
+        self._advanced(window)
+        self._pick_style(window, "wood_cathedral")
+        with tempfile.TemporaryDirectory() as tmp:
+            first = self._render_bytes(window, tmp)
+            spin = window._wear_spins["dirt"]
+            spin.setValue(100.0)
+            spin.editingFinished.emit()
+            self._pump(rounds=4)
+            self.assertNotEqual(self._render_bytes(window, tmp),
+                                first)
+        window.close()
+
+    def test_crack_spacing_renders_differently(self):
+        # The spec's done-when: crack spacing 40 cm vs 10 cm
+        # renders differently. A frame-filling stone box, so
+        # the fissures cover the frame.
+        scene = scene_mod.new_scene("Box")
+        box = scene_mod.new_object(
+            "box", name="Block",
+            params={"size": [100.0, 100.0, 100.0]},
+            material={"base_color": "#b8b0a0", "roughness": 0.8,
+                      "metalness": 0.0, "style": "stone_limestone",
+                      "texture": "stone_limestone"})
+        scene["objects"].append(box)
+        window = self.MainWindow(scene=scene)
+        self._show(window)
+        window._select(box["id"])
+        self._pump()
+        mat = box["material"]
+        with tempfile.TemporaryDirectory() as tmp:
+            mat["wear"] = {"cracks": 10.0}
+            window._viewport.update()
+            self._pump(rounds=4)
+            first = self._render_bytes(window, tmp)
+            mat["wear"] = {"cracks": 40.0}
+            window._viewport.update()
+            self._pump(rounds=4)
+            self.assertNotEqual(self._render_bytes(window, tmp),
+                                first)
+        window.close()
+
+    def test_wear_zero_renders_identically(self):
+        # Wear at 0% changes no pixel: a material with every
+        # wear value stored as 0 renders byte-identically to
+        # the same material with no wear key at all.
+        window = self._open_tavern_mug()
+        self._advanced(window)
+        self._pick_style(window, "wood_cathedral")
+        mat = self._material(window)
+        with tempfile.TemporaryDirectory() as tmp:
+            first = self._render_bytes(window, tmp)
+            mat["wear"] = {"dirt": 0.0, "grime": 0.0,
+                           "edge_wear": 0.0, "moss": 0.0,
+                           "wetness": 0.0}
+            window._viewport.update()
+            self._pump(rounds=4)
+            self.assertEqual(self._render_bytes(window, tmp), first)
+        window.close()
+
+    def test_wear_rows_fit_the_pane(self):
+        # The tallest wear set (stone: 6 rows) fits the pane
+        # sideways: every spin's left and right edges land
+        # inside the inspector scroll viewport (the C8 pane-fit
+        # shape).
+        window = self._open_tavern_mug()
+        self._advanced(window)
+        self._pick_style(window, "stone_granite")
+        scroll = window._inspector_scroll
+        viewport_width = scroll.viewport().width()
+        widgets = list(window._wear_spins.values())
+        self.assertEqual(len(widgets), 6)
         for widget in widgets:
             top_left = scroll.viewport().mapFromGlobal(
                 widget.mapToGlobal(widget.rect().topLeft()))

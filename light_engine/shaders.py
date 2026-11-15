@@ -87,6 +87,8 @@ uniform sampler2D uShadowMap;
 uniform int uUseShadow;
 uniform int uLayoutMode;
 uniform vec2 uLayoutSize;
+uniform vec4 uWearA;
+uniform vec3 uWearB;
 
 out vec4 FragColor;
 
@@ -332,6 +334,123 @@ vec3 layoutSample(vec3 localPos, int mode, vec2 size) {
                 mix(0.45, 1.0, edge));
 }
 
+// Wear (PO5): weather and age overlays — dirt, grime, edge wear,
+// rust, moss, wetness, cracks. Procedural masks in the fragment
+// shader, noise-based, placed where they gather as far as the
+// shader can tell: dirt settles on up-facing surfaces, grime in
+// shaded low spots, moss on damp up-facing patches, rust in
+// clustered patches, edge wear as a bright speckle on exposed
+// faces, wetness darkening and smoothing the surface, cracks as
+// a Voronoi edge field at the stored spacing in cm (polygonal
+// fissures, the way stone and concrete actually crack). HONEST
+// SCOPE: true edge/cavity placement needs curvature data Reblend
+// does not carry, so the v1 masks are noise + height/angle based
+// — they read as weathering, not as measured wear. The uniforms
+// are packed by textures.wear_uniforms: uWearA is (dirt, grime,
+// edge wear, rust) as 0-1 fractions, uWearB is (moss, wetness,
+// crack spacing in cm). All wear is gated on the uniforms in
+// main(): when every wear value is 0 the block never runs, so
+// wear at 0% costs nothing and changes no pixel. The gate is
+// uniform (uniforms only), so the derivatives inside are
+// well-defined, the same as the layout branch.
+
+float wearHash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+float wearNoise(vec2 p) {
+    // Smooth value noise in [0, 1]: bilinear over a hashed grid.
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    float a = wearHash(i);
+    float b = wearHash(i + vec2(1.0, 0.0));
+    float c = wearHash(i + vec2(0.0, 1.0));
+    float d = wearHash(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+vec2 wearFacePlane(vec3 localPos) {
+    // The surface point in object-local cm on its dominant face
+    // plane — the same projection layoutSample uses, so the wear
+    // masks line up with the laid pattern.
+    vec3 fn = normalize(cross(dFdx(localPos), dFdy(localPos)));
+    vec3 a = abs(fn);
+    if (a.x >= a.y && a.x >= a.z) {
+        return vec2(localPos.y, localPos.z);
+    } else if (a.y >= a.z) {
+        return vec2(localPos.x, localPos.z);
+    }
+    return vec2(localPos.x, localPos.y);
+}
+
+float wearCrack(vec2 p, float spacing) {
+    // Voronoi edge field at the crack spacing: the fragment is
+    // on a fissure when the two nearest cell points are almost
+    // equidistant. Returns 1 on a crack line, 0 away from one,
+    // over a ~0.6 cm wide line. Cell points are jittered by
+    // their cell hash, so the fissures wander instead of
+    // gridding. Only called with spacing > 0.
+    vec2 g = p / spacing;
+    vec2 cell = floor(g);
+    vec2 f = fract(g);
+    float f1 = 8.0;
+    float f2 = 8.0;
+    for (int j = -1; j <= 1; j++) {
+        for (int i = -1; i <= 1; i++) {
+            vec2 n = vec2(float(i), float(j));
+            vec2 off = vec2(wearHash(cell + n),
+                            wearHash(cell + n + vec2(11.1, 5.7)));
+            float d = length(n + off - f);
+            if (d < f1) {
+                f2 = f1;
+                f1 = d;
+            } else if (d < f2) {
+                f2 = d;
+            }
+        }
+    }
+    return 1.0 - smoothstep(0.0, 0.6 / spacing, f2 - f1);
+}
+
+void applyWear(inout vec3 albedo, inout float roughness, vec3 N) {
+    // The wear overlay itself. Dirt darkens toward brown, grime
+    // darkens toward grey, edge wear lightens toward pale,
+    // rust tints orange-brown and roughens, moss tints green,
+    // wetness darkens and smooths, cracks darken along the
+    // fissure lines. Each mask is a noise field shaped by the
+    // face angle (up is N.z — the world is z-up) and, for the
+    // low-gathering kinds, by the local height. The albedo
+    // changes land before the Fresnel term is computed in main,
+    // so a worn metal reflects its worn colour.
+    vec2 p = wearFacePlane(vLocalPos);
+    float up = N.z;
+    float blotch = wearNoise(p / 30.0);
+    float fine = wearNoise(p / 8.0 + vec2(13.7, 7.1));
+    float dirtMask = blotch * (0.4 + 0.6 * smoothstep(-0.2, 0.8, up));
+    albedo = mix(albedo, albedo * vec3(0.45, 0.33, 0.20),
+                 uWearA.x * dirtMask * 0.8);
+    float grimeMask = fine * (0.35 + 0.65 * smoothstep(0.3, -0.9, up));
+    albedo *= 1.0 - 0.45 * uWearA.y * grimeMask;
+    float edgeMask = fine * smoothstep(0.2, 0.9, up);
+    albedo = mix(albedo, vec3(0.85), uWearA.z * edgeMask * 0.35);
+    float rustMask = smoothstep(0.45, 0.75, blotch)
+                   * smoothstep(0.35, 0.7, fine);
+    albedo = mix(albedo, vec3(0.48, 0.22, 0.08),
+                 uWearA.w * rustMask * 0.85);
+    roughness = mix(roughness, 1.0, uWearA.w * rustMask * 0.5);
+    float mossMask = blotch * smoothstep(0.0, 0.7, up)
+                   * (0.5 + 0.5 * fine);
+    albedo = mix(albedo, vec3(0.24, 0.48, 0.16),
+                 uWearB.x * mossMask * 0.9);
+    float wetMask = 0.35 + 0.65 * blotch;
+    albedo *= 1.0 - 0.3 * uWearB.y * wetMask;
+    roughness *= 1.0 - 0.65 * uWearB.y * wetMask;
+    if (uWearB.z > 0.0) {
+        albedo *= 1.0 - 0.55 * wearCrack(p, uWearB.z);
+    }
+}
+
 void main() {
     vec3 N = normalize(vNormal);
     // Two-sided lighting, as the fixed-function renderer had: back
@@ -352,13 +471,25 @@ void main() {
             albedo = texture(uTex, lay.xy).rgb * lay.z;
         }
     }
+    // A roughness floor keeps the GGX denominator sane; a perfectly
+    // smooth surface would be a mirror with an infinitely tight lobe.
+    float roughness = clamp(uRoughness, 0.05, 1.0);
+    // Wear (PO5): the weather/age overlay, gated on the wear
+    // uniforms — the gate is their sum, and when every wear value
+    // is 0 the sum is exactly 0 and the block never runs, so wear
+    // at 0% costs nothing and changes no pixel. (Cracks are
+    // centimetres, not a fraction, so they enter the sum clamped
+    // to 1.) The overlay runs before the Fresnel term, so a worn
+    // metal reflects its worn colour.
+    float wearAmount = dot(uWearA, vec4(1.0)) + uWearB.x + uWearB.y
+                     + min(uWearB.z, 1.0);
+    if (wearAmount > 0.0) {
+        applyWear(albedo, roughness, N);
+    }
     vec3 V = normalize(uViewPos - vWorldPos);
     // Reflectance at normal incidence: dielectrics 0.04, metals the
     // albedo color. Same mix the PBR metallic/roughness model uses.
     vec3 F0 = mix(vec3(0.04), albedo, uMetalness);
-    // A roughness floor keeps the GGX denominator sane; a perfectly
-    // smooth surface would be a mirror with an infinitely tight lobe.
-    float roughness = clamp(uRoughness, 0.05, 1.0);
     vec3 color = albedo * uAmbient * (1.0 - uMetalness);
     for (int i = 0; i < 3; i++) {
         vec3 L = normalize(uLightPos[i] - vWorldPos);

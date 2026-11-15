@@ -102,6 +102,18 @@ FIELD_HELP = {
     "layout_square_size": "How wide each square is, in centimeters.",
     "layout_slab_width": "How wide each slab is, in centimeters.",
     "layout_slab_length": "How long each slab is, in centimeters.",
+    # Wear rows (PO5): one line per wear type in WEAR_UI below.
+    # Same rules as the rest: plain words, ends with a period,
+    # no em-dash, no bare "&".
+    "wear_dirt": "How dirty the surface is. 0 is clean, 100 is filthy.",
+    "wear_grime": "How grimy the surface is. 0 is clean, 100 is caked.",
+    "wear_edge_wear": "How worn the exposed edges look. 0 is sharp "
+                      "and new.",
+    "wear_rust": "How much rust shows. 0 is clean metal.",
+    "wear_moss": "How much moss grows on it. 0 is none.",
+    "wear_wetness": "How wet the surface is. 0 is dry, 100 is soaked.",
+    "wear_cracks": "How far apart the cracks run, in centimeters. "
+                   "0 means no cracks.",
 }
 
 
@@ -311,8 +323,8 @@ def param_knobs_for(style, advanced):
     not a way to skip the choice. PO4's layout rows are
     Advanced-only too, but they are not param knobs — they slot
     into the same container in window.py, under the same toggle
-    (see layout_rows_for); PO5's wear rows will follow the same
-    pattern when that task lands."""
+    (see layout_rows_for); PO5's wear rows follow the same
+    pattern (see wear_rows_for)."""
     knobs = PARAM_UI.get(style, ())
     if advanced:
         return knobs
@@ -398,6 +410,54 @@ def layout_rows_for(layout):
     """The size rows the Material section shows for a layout (PO4):
     the LAYOUT_UI entry, or no rows for solid and the brick bonds."""
     return LAYOUT_UI.get(layout, ())
+
+
+# Wear rows (PO5): for each wear type, the row the Material
+# section shows under the "Life" label, Advanced-only, after the
+# layout rows. Each row: the wear key it edits, its plain-words
+# label, its kind ("percent" — a 0-100 amount; "cracks_cm" — a
+# fissure spacing in cm, 0 meaning no cracks), the spin range +
+# step + decimals, and its FIELD_HELP key. Which rows a style
+# shows comes from the registry (textures.wear_for_style), so
+# this table carries one row per wear type, not one per style.
+# The values are stored in the material's "wear" dict as
+# overrides only — 0 stores nothing, so old scenes (no "wear"
+# key) load clean and dry.
+WEAR_UI = {
+    "dirt": {"key": "dirt", "label": "Dirt", "kind": "percent",
+             "low": 0.0, "high": 100.0, "step": 5.0, "decimals": 0,
+             "help": "wear_dirt"},
+    "grime": {"key": "grime", "label": "Grime", "kind": "percent",
+              "low": 0.0, "high": 100.0, "step": 5.0, "decimals": 0,
+              "help": "wear_grime"},
+    "edge_wear": {"key": "edge_wear", "label": "Edge wear",
+                  "kind": "percent",
+                  "low": 0.0, "high": 100.0, "step": 5.0,
+                  "decimals": 0, "help": "wear_edge_wear"},
+    "rust": {"key": "rust", "label": "Rust", "kind": "percent",
+             "low": 0.0, "high": 100.0, "step": 5.0, "decimals": 0,
+             "help": "wear_rust"},
+    "moss": {"key": "moss", "label": "Moss", "kind": "percent",
+             "low": 0.0, "high": 100.0, "step": 5.0, "decimals": 0,
+             "help": "wear_moss"},
+    "wetness": {"key": "wetness", "label": "Wetness",
+                "kind": "percent",
+                "low": 0.0, "high": 100.0, "step": 5.0,
+                "decimals": 0, "help": "wear_wetness"},
+    "cracks": {"key": "cracks", "label": "Crack spacing",
+               "kind": "cracks_cm",
+               "low": 0.0, "high": 40.0, "step": 1.0, "decimals": 0,
+               "help": "wear_cracks"},
+}
+
+
+def wear_rows_for(style):
+    """The wear rows the Material section shows for a style (PO5):
+    one row per wear type the style takes, in registry order.
+    A style-less material takes the generic set, so the rows show
+    whenever Advanced is on."""
+    from .textures import wear_for_style
+    return tuple(WEAR_UI[key] for key in wear_for_style(style))
 
 
 def _physics_enabled(obj):

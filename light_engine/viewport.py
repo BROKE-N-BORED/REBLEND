@@ -82,7 +82,8 @@ from .geometry import (GIZMO_MIN_SCALE, GIZMO_MODES, GIZMO_MOVE_TIP,
 from .scene import default_smooth_shading, hex_to_rgb
 from .textures import (build_qimage, layout_affects_bake,
                        layout_shader_mode, merged_layout_size,
-                       merged_params, resolve_layout, resolve_style)
+                       merged_params, resolve_layout, resolve_style,
+                       wear_uniforms)
 
 # GL enum values (kept numeric, as in the Bench pattern, so the calls read
 # the same as the OpenGL docs). Core profile only — no fixed-function
@@ -1583,6 +1584,15 @@ class Viewport(QOpenGLWidget):
                 layout, mat.get("layout_size"))
             prog.setUniformValue("uLayoutSize",
                                  QtGui.QVector2D(width, length))
+            # Wear (PO5): the weather/age overlay, from the
+            # (possibly preview-merged) material. Set on every
+            # draw — uniforms persist across draws, so a worn
+            # object after a clean one must not inherit its wear.
+            # The packing lives in textures.wear_uniforms, so the
+            # viewport never packs by hand.
+            wear_a, wear_b = wear_uniforms(style, mat.get("wear"))
+            prog.setUniformValue("uWearA", QtGui.QVector4D(*wear_a))
+            prog.setUniformValue("uWearB", QtGui.QVector3D(*wear_b))
             model = self._model_matrix(obj)
             qm = QtGui.QMatrix4x4(*[v for row in model for v in row])
             prog.setUniformValue("uModel", qm)

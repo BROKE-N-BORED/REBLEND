@@ -74,6 +74,7 @@ MATERIAL_DEFAULTS = {"base_color": "#b0b0b0", "roughness": 0.6,
                      "metalness": 0.0, "style": "none",
                      "texture": "none", "params": {},
                      "layout": "solid", "layout_size": {},
+                     "wear": {},
                      "density": 1.0, "friction": 0.5,
                      "restitution": 0.3}
 
@@ -407,6 +408,21 @@ def default_material(overrides=None):
             and not isinstance(value, bool)}
     else:
         mat["params"] = {}
+    # "wear" (PO5): the weather/age values, overrides only like
+    # "params" — {} means clean and dry, no cracks. Normalized
+    # the same way: numbers kept, everything else dropped, a
+    # fresh dict on every call. The style filter and the clamps
+    # live in textures.merged_wear, which the viewport calls at
+    # draw time — the scene keeps the stored values as they are.
+    raw_wear = mat.get("wear")
+    if isinstance(raw_wear, dict):
+        mat["wear"] = {
+            key: float(value)
+            for key, value in raw_wear.items()
+            if isinstance(value, (int, float))
+            and not isinstance(value, bool)}
+    else:
+        mat["wear"] = {}
     mat["roughness"] = max(0.0, min(1.0, float(mat["roughness"])))
     mat["metalness"] = max(0.0, min(1.0, float(mat["metalness"])))
     mat["density"] = _material_number(mat["density"], 1.0, 0.0)

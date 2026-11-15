@@ -23,6 +23,7 @@ from . import style as style_mod
 from . import video as video_mod
 from .inspector_data import FIELD_HELP, _physics_enabled
 from .inspector_data import layout_rows_for, param_knobs_for
+from .inspector_data import wear_rows_for
 from .scene import (EMITTER_COLLIDE, EMITTER_PRESETS, EMITTER_SHAPES,
                     MATERIAL_PRESETS, default_smooth_shading,
                     find_object, load_scene, material_preset_for,
@@ -32,8 +33,8 @@ from .scene import (EMITTER_COLLIDE, EMITTER_PRESETS, EMITTER_SHAPES,
 from .textures import (FAMILIES, LAYOUT_DISPLAY, STYLES,
                        count_to_spacing, default_layout,
                        layouts_for_style, merged_layout_size,
-                       merged_params, resolve_layout, spacing_to_count,
-                       style_params)
+                       merged_params, merged_wear, resolve_layout,
+                       spacing_to_count, style_params)
 from .viewport import Viewport
 
 SOFT_TRI_BUDGET = 100000
@@ -1502,6 +1503,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # Simple.
         self._layout_combo = None
         self._layout_spins = {}
+        # The wear spins (PO5): rebuilt with the knobs and the
+        # layout rows in _sync_param_rows. None / empty when the
+        # Life rows are hidden.
+        self._wear_spins = {}
         body.addWidget(self._param_rows)
         # The re-bake debounce (see PARAM_REBAKE_MS): a knob
         # change restarts it, and the repaint fires once, 150 ms
@@ -1857,8 +1862,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # only the simple knobs in Simple, every knob in
         # Advanced — so a hidden knob keeps its stored override
         # and shows it again when the mode changes. PO4's layout
-        # rows slot in here, after the param knobs, Advanced-only
-        # (PO5's wear rows will follow the same pattern). The old
+        # rows slot in here, after the param knobs, Advanced-only,
+        # and PO5's wear rows follow them, under a "Life" label.
+        # The old
         # rows are taken out of the layout and deleted at once,
         # so a style with fewer knobs leaves nothing behind; the
         # spins are built with their values set before the
@@ -1883,6 +1889,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._param_spins = {}
         self._layout_combo = None
         self._layout_spins = {}
+        self._wear_spins = {}
         style = resolve_material_style(mat)
         params = merged_params(style, mat.get("params"))
         for knob in param_knobs_for(
@@ -1951,10 +1958,43 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._layout_spins[row["key"]] = spin
                     self._param_layout.addWidget(spin)
                     self._param_layout.addWidget(self._help(row["help"]))
-        # Hidden while empty, so a style-less material leaves
-        # the inspector exactly as it was before PO2.
+            # Wear rows (PO5): the Life rows — dirt, grime, edge
+            # wear, rust, moss, wetness, cracks — Advanced-only,
+            # after the layout rows. Every style takes some wear
+            # (the registry decides which), and a style-less
+            # material takes the generic set, so the rows show
+            # whenever Advanced is on. The values are percentages
+            # (cracks is a spacing in cm, 0 meaning no cracks),
+            # stored overrides-only in the material's "wear" dict.
+            # The spins are built with their values set before
+            # the signals are connected, so syncing never fires
+            # a change — the same shape as the knobs above.
+            wear_rows = wear_rows_for(style)
+            if wear_rows:
+                self._param_layout.addWidget(
+                    QtWidgets.QLabel("Life"))
+                wear = merged_wear(style, mat.get("wear"))
+                for row in wear_rows:
+                    self._param_layout.addWidget(
+                        QtWidgets.QLabel(row["label"]))
+                    spin = QtWidgets.QDoubleSpinBox()
+                    spin.setRange(row["low"], row["high"])
+                    spin.setDecimals(row["decimals"])
+                    spin.setSingleStep(row["step"])
+                    spin.setMinimumWidth(48)
+                    spin.setValue(round(wear[row["key"]],
+                                        row["decimals"]))
+                    spin.valueChanged.connect(
+                        lambda v, k=row: self._on_wear_changed(k, v))
+                    spin.editingFinished.connect(self._commit_live_edit)
+                    self._wear_spins[row["key"]] = spin
+                    self._param_layout.addWidget(spin)
+                    self._param_layout.addWidget(self._help(row["help"]))
+        # Hidden while empty, so a style-less material in Simple
+        # leaves the inspector exactly as it was before PO2.
         self._param_rows.setVisible(
-            bool(self._param_spins) or self._layout_combo is not None)
+            bool(self._param_spins) or self._layout_combo is not None
+            or bool(self._wear_spins))
 
     def _on_material_advanced_toggled(self, _checked):
         # Simple / Advanced (PO3): rebuild the knob rows for the
@@ -2294,6 +2334,10 @@ class MainWindow(QtWidgets.QMainWindow):
             # style that takes no layout.
             mat["layout"] = default_layout(text)
             mat["layout_size"] = {}
+            # And clean (PO5): wear clears in the same step, so
+            # a rusted metal's rust does not follow the material
+            # onto a style that cannot rust.
+            mat["wear"] = {}
             self._sync_param_rows(mat)
             self._viewport.update()
 
@@ -2329,8 +2373,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # the current style — which may share keys like
         # "strength" — never leak into the preview. Restoring
         # returns the stored params, untouched in the scene.
+        # Wear pins the same way (PO5): the previewed style
+        # shows clean, and the stored wear survives the hover.
         self._preview_material({"texture": name, "style": name,
-                                "params": {}})
+                                "params": {}, "wear": {}})
 
     def _on_material_preset_highlighted(self, index):
         # Hovering a preset previews its look (UI12, entry 017):
@@ -2542,6 +2588,34 @@ class MainWindow(QtWidgets.QMainWindow):
                 sizes.pop(row["key"], None)
             else:
                 sizes[row["key"]] = size_value
+            self._viewport.update()
+
+    def _on_wear_changed(self, row, value):
+        # A wear edit (PO5, live-edit pattern, like the layout
+        # sizes): the gesture arms on the first change and
+        # commits on editingFinished. Every wear value defaults
+        # to 0 (clean, dry, no cracks), so the comparison is
+        # against the merged value and a value of 0 is not
+        # stored at all: wear holds overrides only, so a gesture
+        # that ends at 0 compares equal to its snapshot (T14).
+        # No debounce: wear is a shader uniform, not a re-bake,
+        # so the repaint is instant.
+        if self._refreshing:
+            return
+        obj = find_object(self.scene, self.selected_id) if self.selected_id else None
+        if obj is None:
+            return
+        wear_value = round(value, row["decimals"])
+        mat = obj.setdefault("material", {})
+        wear = mat.setdefault("wear", {})
+        style = resolve_material_style(mat)
+        effective = merged_wear(style, wear).get(row["key"], 0.0)
+        if effective != wear_value:
+            self._arm_live_edit()
+            if wear_value == 0.0:
+                wear.pop(row["key"], None)
+            else:
+                wear[row["key"]] = wear_value
             self._viewport.update()
 
     def _on_smooth_shading_changed(self, checked):

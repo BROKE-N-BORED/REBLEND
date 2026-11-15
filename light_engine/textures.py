@@ -408,6 +408,56 @@ def layout_affects_bake(style):
     return resolve_style(style) == "brick_stretcher"
 
 
+# The wear set for a style-less material ("none" or unknown): the
+# wood set, the most generic — dirt, grime, edge wear, moss, and
+# wetness. Rust needs metal and cracks need stone or concrete, so
+# neither is in the generic set.
+GENERIC_WEAR = ("dirt", "grime", "edge_wear", "moss", "wetness")
+
+
+def wear_for_style(style):
+    """The wear types a style takes, in registry order. Unknown
+    styles (and "none") take the generic set — wear overlays any
+    material, even a plain colour with no pattern."""
+    entry = STYLES.get(resolve_style(style))
+    if entry is None:
+        return list(GENERIC_WEAR)
+    return list(entry["wear"])
+
+
+def merged_wear(style, wear=None):
+    """A style's wear values with a caller's overrides merged over
+    the defaults: every wear type the style takes, default 0.0
+    (clean, dry, no cracks). Percentages clamp to 0-100; cracks
+    (a fissure spacing in cm, 0 meaning no cracks) clamps to
+    0-100. Unknown keys, non-numbers, and wear the style does not
+    take are dropped — a stored rust value must not follow the
+    material onto a style that cannot rust. Never raises."""
+    merged = {key: 0.0 for key in wear_for_style(style)}
+    if isinstance(wear, dict):
+        for key, value in wear.items():
+            if (key in merged and isinstance(value, (int, float))
+                    and not isinstance(value, bool)):
+                merged[key] = max(0.0, min(100.0, float(value)))
+    return merged
+
+
+def wear_uniforms(style, wear=None):
+    """The wear values as the shader takes them (see shaders.py):
+    (uWearA, uWearB), where uWearA is (dirt, grime, edge wear,
+    rust) as 0-1 fractions and uWearB is (moss, wetness, crack
+    spacing in cm). The packing is the contract with the fragment
+    shader — the viewport calls this, never packs by hand, so the
+    two can never disagree about which component is which."""
+    merged = merged_wear(style, wear)
+    wear_a = tuple(merged.get(key, 0.0) / 100.0
+                   for key in ("dirt", "grime", "edge_wear", "rust"))
+    wear_b = (merged.get("moss", 0.0) / 100.0,
+              merged.get("wetness", 0.0) / 100.0,
+              merged.get("cracks", 0.0))
+    return wear_a, wear_b
+
+
 # The texture tile is one metre of material (PO2): the pattern
 # works in (u, v) space, and the tile spans the object's face, so
 # a count parameter (rings, rows, threads) is a count per metre
