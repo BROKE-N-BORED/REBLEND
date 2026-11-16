@@ -14,7 +14,7 @@ from the triangle soup. Mesh objects (T7) always draw indexed, from
 the .mesh.json asset file (see meshfile.py), cached once per scene
 by resolved path; they cast and receive shadows through the same
 VAOs as primitives. One shadow map (T5): the key light only, a
-1024x1024 depth map rendered each paint from the light's viewpoint,
+2048x2048 depth map rendered each paint from the light's viewpoint,
 sampled in the main pass with a 3x3 PCF. Per-object cast/receive
 flags decide who casts and who receives. Gizmo (T12): a Move/Rotate/
 Scale gizmo on the selected object, drawn with the lines program only
@@ -130,8 +130,10 @@ GL_POLYGON_OFFSET_FILL = 0x8037
 # Interleaved object VBO layout: position (3) + normal (3) + uv (2).
 VERTEX_STRIDE = 32
 
-# One shadow map, key light only, 1024x1024 (T5).
-SHADOW_MAP_SIZE = 1024
+# One shadow map, key light only, 2048x2048 (T5; SH1 raised it from
+# 1024 — the 1024 map showed 4-8 px stair-steps on diagonal shadow
+# edges in the close-up shot).
+SHADOW_MAP_SIZE = 2048
 
 # Frame stats (UI10) + self-tuning quality (UI11).
 # The rolling average covers the last 30 paints; the readout appears
@@ -171,12 +173,13 @@ TUNER_SETTLE_FRAMES = FRAME_STATS_WINDOW
 # engaged. 500 ms has 2x margin over that max and is far below
 # the seconds separating isolated paints.)
 TUNER_CONTINUOUS_GAP_MS = 500.0
-# Quality ladder (UI11): (shadow map size or None for off, render
-# scale). Each level is strictly cheaper than the one before it:
-# full quality, smaller shadow map, shadows off, then two steps of
-# lower render scale.
-QUALITY_LEVELS = ((1024, 1.0), (512, 1.0), (None, 1.0),
-                  (None, 0.75), (None, 0.5))
+# Quality ladder (UI11; SH1 added the top rung): (shadow map size
+# or None for off, render scale). Each level is strictly cheaper
+# than the one before it: full quality (2048 map), the old full
+# quality as fallback (1024 map), smaller shadow map (512),
+# shadows off, then two steps of lower render scale.
+QUALITY_LEVELS = ((2048, 1.0), (1024, 1.0), (512, 1.0),
+                  (None, 1.0), (None, 0.75), (None, 0.5))
 
 # Render-scale blit (UI11): a fullscreen triangle that samples the
 # scaled framebuffer's texture, upscaling it to the widget. No
@@ -331,7 +334,7 @@ class Viewport(QOpenGLWidget):
         # exactly. The window sets this on combo highlight and
         # clears it when the popup closes or a pick applies.
         self._material_preview = None
-        # Shadow map (T5): one 1024x1024 depth map from the key light.
+        # Shadow map (T5): one 2048x2048 depth map from the key light.
         # _shadow_fbo is a QOpenGLFramebufferObject (NoAttachment) whose
         # handle carries the depth texture; _shadow_tex is the depth
         # texture itself. _shadow_error is set (plain words) when the

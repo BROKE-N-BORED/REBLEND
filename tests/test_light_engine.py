@@ -1542,7 +1542,7 @@ class ShadowTests(unittest.TestCase):
     def test_viewport_renders_a_shadow_pass(self):
         source = (HERE / "light_engine" / "viewport.py").read_text(
             encoding="utf-8")
-        self.assertIn("SHADOW_MAP_SIZE = 1024", source)
+        self.assertIn("SHADOW_MAP_SIZE = 2048", source)
         self.assertIn("_render_shadow_map", source)
         self.assertIn("_light_space_matrix", source)
         self.assertIn("_build_shadow_map", source)
@@ -10684,18 +10684,19 @@ class QtFrameStatsTests(unittest.TestCase):
 
 @unittest.skipUnless(QT_TESTS, "Qt tests need LIGHT_ENGINE_QT_TESTS=1")
 class QtViewportTunerTests(unittest.TestCase):
-    """UI11 (U35/U36): the viewport measures its own frame time
-    and steps down a quality ladder silently — full quality,
-    smaller shadow map, shadows off, then two steps of lower
-    render scale — and back up when frames are fast again. No
-    setting is shown. The steps are hysteresis-guarded: 30
-    consecutive slow samples to step down, 60 consecutive fast
-    samples to step back up, a dead band between the 41.7 ms
-    step-down threshold and the 20 ms step-up threshold, and a
-    30-paint settle after each level change while the rolling
-    window flushes. Synthetic samples are fed through
-    _record_frame_time with continuous=True, the same choke
-    point real playback paints use."""
+    """UI11 (U35/U36) + SH1: the viewport measures its own frame
+    time and steps down a quality ladder silently — full quality
+    (2048 shadow map), the old full quality as fallback (1024
+    map), smaller shadow map (512), shadows off, then two steps
+    of lower render scale — six rungs, and back up when frames
+    are fast again. No setting is shown. The steps are
+    hysteresis-guarded: 30 consecutive slow samples to step
+    down, 60 consecutive fast samples to step back up, a dead
+    band between the 41.7 ms step-down threshold and the 20 ms
+    step-up threshold, and a 30-paint settle after each level
+    change while the rolling window flushes. Synthetic samples
+    are fed through _record_frame_time with continuous=True,
+    the same choke point real playback paints use."""
 
     @classmethod
     def setUpClass(cls):
@@ -10773,12 +10774,23 @@ class QtViewportTunerTests(unittest.TestCase):
                 return count + 1
         self.fail(f"level {target} not reached after {limit} samples")
 
+    def test_ladder_is_six_rungs(self):
+        """SH1: the ladder is six rungs, each strictly cheaper
+        than the one before — the 2048 map on top, the old 1024
+        full quality kept as the first fallback."""
+        from light_engine import viewport as viewport_mod
+        self.assertEqual(viewport_mod.SHADOW_MAP_SIZE, 2048)
+        self.assertEqual(
+            viewport_mod.QUALITY_LEVELS,
+            ((2048, 1.0), (1024, 1.0), (512, 1.0),
+             (None, 1.0), (None, 0.75), (None, 0.5)))
+
     def test_light_scene_stays_full_quality(self):
         window = self._open_tavern()
         viewport = window._viewport
         self._clear_stats(window)
         self._feed(viewport, 8.0, 200)
-        self.assertEqual(viewport.quality_info(), (0, 1024, 1.0))
+        self.assertEqual(viewport.quality_info(), (0, 2048, 1.0))
 
     def test_heavy_scene_steps_down_the_ladder(self):
         window = self._open_tavern()
@@ -10790,10 +10802,10 @@ class QtViewportTunerTests(unittest.TestCase):
             level = viewport.quality_info()[0]
             if level != seen[-1]:
                 seen.append(level)
-            if level == 4:
+            if level == 5:
                 break
-        self.assertEqual(seen, [0, 1, 2, 3, 4])
-        self.assertEqual(viewport.quality_info(), (4, None, 0.5))
+        self.assertEqual(seen, [0, 1, 2, 3, 4, 5])
+        self.assertEqual(viewport.quality_info(), (5, None, 0.5))
 
     def test_hysteresis_dead_band_holds(self):
         """30 ms sits between the 20 ms step-up threshold and the
@@ -10877,23 +10889,23 @@ class QtViewportTunerTests(unittest.TestCase):
         window = self._open_tavern()
         viewport = window._viewport
         self._clear_stats(window)
-        self._feed_until_level(viewport, 2)
-        self.assertEqual(viewport.quality_info(), (2, None, 1.0))
+        self._feed_until_level(viewport, 3)
+        self.assertEqual(viewport.quality_info(), (3, None, 1.0))
         with viewport.full_quality():
-            self.assertEqual(viewport.quality_info(), (0, 1024, 1.0))
+            self.assertEqual(viewport.quality_info(), (0, 2048, 1.0))
             # The tuner does not count paints while an export
             # holds the override — a batch render is not
             # interactive load.
             self._feed(viewport, 80.0, 50)
             with viewport.full_quality():
                 self.assertEqual(viewport.quality_info(),
-                                 (0, 1024, 1.0))
-            self.assertEqual(viewport.quality_info(), (0, 1024, 1.0))
-        self.assertEqual(viewport.quality_info(), (2, None, 1.0))
+                                 (0, 2048, 1.0))
+            self.assertEqual(viewport.quality_info(), (0, 2048, 1.0))
+        self.assertEqual(viewport.quality_info(), (3, None, 1.0))
         # The override reset the streaks: 10 more slow samples
         # (inside the release settle) change nothing.
         self._feed(viewport, 80.0, 10)
-        self.assertEqual(viewport.quality_info()[0], 2)
+        self.assertEqual(viewport.quality_info()[0], 3)
 
     def test_shadow_map_rebuilds_at_512(self):
         """The level change is state only; the shadow map is
@@ -10902,16 +10914,16 @@ class QtViewportTunerTests(unittest.TestCase):
         window = self._open_tavern()
         viewport = window._viewport
         self._clear_stats(window)
-        self._feed_until_level(viewport, 1)
+        self._feed_until_level(viewport, 2)
         self._paint_once(viewport)
         self.assertEqual(viewport._shadow_size, 512)
         self.assertIsNotNone(viewport._shadow_fbo)
         self.assertTrue(viewport._shadow_fbo.isValid())
-        self._feed_until_level(viewport, 2)
+        self._feed_until_level(viewport, 3)
         self._paint_once(viewport)
         self.assertIsNone(viewport._shadow_size)
         self.assertIsNone(viewport._shadow_fbo)
-        # And back to full quality: the 1024 map comes back.
+        # And back to full quality: the 2048 map comes back.
         for _ in range(400):
             viewport._record_frame_time(8.0, True)
             if viewport.quality_info()[0] == 0:
@@ -10919,19 +10931,19 @@ class QtViewportTunerTests(unittest.TestCase):
         else:
             self.fail("level 0 not reached after 400 fast samples")
         self._paint_once(viewport)
-        self.assertEqual(viewport._shadow_size, 1024)
+        self.assertEqual(viewport._shadow_size, 2048)
         self.assertIsNotNone(viewport._shadow_fbo)
         self.assertTrue(viewport._shadow_fbo.isValid())
 
     def test_render_scale_renders(self):
-        """At level 4 the scene renders into a half-size FBO and
+        """At level 5 the scene renders into a half-size FBO and
         is upscaled into the widget: the grab is still the full
         widget size, and it is a real render, not a stale or
         blank frame."""
         window = self._open_tavern()
         viewport = window._viewport
         self._clear_stats(window)
-        self._feed_until_level(viewport, 4)
+        self._feed_until_level(viewport, 5)
         self._paint_once(viewport)
         self.assertIsNotNone(viewport._scale_fbo)
         self.assertEqual(
