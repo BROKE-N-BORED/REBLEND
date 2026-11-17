@@ -13640,5 +13640,314 @@ class QtFColorTests(unittest.TestCase):
             window.close()
 
 
+@unittest.skipUnless(QT_TESTS, "Qt tests need LIGHT_ENGINE_QT_TESTS=1")
+class QtDialTests(unittest.TestCase):
+    """R3: the reusable dial widget. One painted knob with an
+    always-visible numeric readout, used by the wheel center, the
+    material editor's knobs, and later the light/camera params.
+    Drag vertically or scroll to change, click to type, arrow
+    keys adjust, Esc cancels a drag. The dial is a component
+    only — no product surface wires it in yet (R2 does that) —
+    so these tests mount it in a plain window, no MainWindow."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6 import QtWidgets
+        cls._app = QtWidgets.QApplication.instance()
+        if cls._app is None:
+            cls._app = QtWidgets.QApplication([])
+        from light_engine.dial import Dial
+        cls.Dial = Dial
+
+    def setUp(self):
+        from PySide6 import QtWidgets
+        self._host = QtWidgets.QWidget()
+        self._dial = self.Dial(0.0, 100.0, 1.0, value=50.0,
+                               parent=self._host)
+        self._dial.resize(self._dial.sizeHint())
+        self._dial.move(10, 10)
+        self._host.resize(120, 140)
+        self._host.show()
+        self._pump()
+
+    def tearDown(self):
+        self._host.close()
+        self._pump()
+
+    def _pump(self, rounds=5):
+        from PySide6 import QtCore, QtWidgets
+        for _ in range(rounds):
+            QtWidgets.QApplication.processEvents()
+            QtCore.QThread.msleep(10)
+
+    def _centre(self):
+        from PySide6 import QtCore
+        return QtCore.QPoint(self._dial.width() // 2,
+                             self._dial.height() // 2)
+
+    def _wheel(self, angle_y):
+        """Send a wheel event with the given angle delta (+120 is
+        one notch up) at the dial's centre."""
+        from PySide6 import QtCore, QtGui, QtWidgets
+        pos = QtCore.QPointF(self._centre())
+        event = QtGui.QWheelEvent(
+            pos, self._dial.mapToGlobal(self._centre()),
+            QtCore.QPoint(0, 0), QtCore.QPoint(0, angle_y),
+            QtCore.Qt.NoButton, QtCore.Qt.NoModifier,
+            QtCore.Qt.NoScrollPhase, False)
+        QtWidgets.QApplication.sendEvent(self._dial, event)
+        self._pump()
+
+    def _click_readout(self):
+        """A plain click on the readout: opens the type-in
+        editor."""
+        from PySide6.QtTest import QTest
+        from PySide6 import QtCore
+        point = QtCore.QPoint(self._dial.width() // 2,
+                              self._dial.height() - 11)
+        QTest.mouseClick(self._dial, QtCore.Qt.LeftButton,
+                         QtCore.Qt.NoModifier, point)
+        self._pump()
+
+    def _type_and_commit(self, text):
+        """Type into the open editor and press Return."""
+        from PySide6.QtTest import QTest
+        from PySide6 import QtCore
+        editor = self._dial._editor
+        QTest.keyClicks(editor, text)
+        QTest.keyClick(editor, QtCore.Qt.Key_Return)
+        self._pump()
+
+    def test_drag_up_increases_value(self):
+        from PySide6.QtTest import QTest
+        from PySide6 import QtCore
+        start = self._centre()
+        QTest.mousePress(self._dial, QtCore.Qt.LeftButton,
+                         QtCore.Qt.NoModifier, start)
+        # Up 50 px: the full 0-100 range spans 200 px, so +25.
+        QTest.mouseMove(self._dial, start - QtCore.QPoint(0, 50), 30)
+        QTest.mouseRelease(self._dial, QtCore.Qt.LeftButton,
+                           QtCore.Qt.NoModifier,
+                           start - QtCore.QPoint(0, 50))
+        self._pump()
+        self.assertAlmostEqual(self._dial.value(), 75.0, places=6)
+
+    def test_drag_down_decreases_value(self):
+        from PySide6.QtTest import QTest
+        from PySide6 import QtCore
+        start = self._centre()
+        QTest.mousePress(self._dial, QtCore.Qt.LeftButton,
+                         QtCore.Qt.NoModifier, start)
+        QTest.mouseMove(self._dial, start + QtCore.QPoint(0, 50), 30)
+        QTest.mouseRelease(self._dial, QtCore.Qt.LeftButton,
+                           QtCore.Qt.NoModifier,
+                           start + QtCore.QPoint(0, 50))
+        self._pump()
+        self.assertAlmostEqual(self._dial.value(), 25.0, places=6)
+
+    def test_drag_clamps_at_the_ends(self):
+        from PySide6.QtTest import QTest
+        from PySide6 import QtCore
+        start = self._centre()
+        QTest.mousePress(self._dial, QtCore.Qt.LeftButton,
+                         QtCore.Qt.NoModifier, start)
+        # Up 200 px from 50 would be +100: clamps at the max.
+        QTest.mouseMove(self._dial, start - QtCore.QPoint(0, 200), 30)
+        QTest.mouseRelease(self._dial, QtCore.Qt.LeftButton,
+                           QtCore.Qt.NoModifier,
+                           start - QtCore.QPoint(0, 200))
+        self._pump()
+        self.assertEqual(self._dial.value(), 100.0)
+
+    def test_scroll_changes_value_by_the_step(self):
+        self._wheel(120)   # one notch up
+        self.assertEqual(self._dial.value(), 51.0)
+        self._wheel(-240)  # two notches down
+        self.assertEqual(self._dial.value(), 49.0)
+
+    def test_scroll_clamps_at_the_ends(self):
+        self._dial.setValue(100.0)
+        self._wheel(120)
+        self.assertEqual(self._dial.value(), 100.0)
+        self._dial.setValue(0.0)
+        self._wheel(-120)
+        self.assertEqual(self._dial.value(), 0.0)
+
+    def test_readout_always_shows_the_current_value(self):
+        # The readout is never hidden: after every way of
+        # changing the value, the painted string matches it.
+        self.assertEqual(self._dial.readout_text(), "50")
+        self._dial.setValue(37.0)
+        self.assertEqual(self._dial.readout_text(), "37")
+        self._wheel(120)
+        self.assertEqual(self._dial.readout_text(), "38")
+        self._dial.setValue(100.0)
+        self.assertEqual(self._dial.readout_text(), "100")
+
+    def test_readout_shows_the_unit_and_step_decimals(self):
+        dial = self.Dial(0.0, 200.0, 0.5, value=123.5, unit="cm",
+                         parent=self._host)
+        self.assertEqual(dial.readout_text(), "123.5 cm")
+        percent = self.Dial(0.0, 100.0, 1.0, value=75.0, unit="%",
+                            parent=self._host)
+        self.assertEqual(percent.readout_text(), "75%")
+        quarter = self.Dial(0.0, 10.0, 0.25, value=2.5,
+                            parent=self._host)
+        self.assertEqual(quarter.readout_text(), "2.50")
+
+    def test_click_to_type_sets_the_value(self):
+        self._click_readout()
+        self.assertTrue(self._dial.is_editing())
+        self._type_and_commit("42")
+        self.assertFalse(self._dial.is_editing())
+        self.assertEqual(self._dial.value(), 42.0)
+        self.assertEqual(self._dial.readout_text(), "42")
+
+    def test_typing_clamps_to_the_range(self):
+        self._click_readout()
+        self._type_and_commit("999")
+        self.assertEqual(self._dial.value(), 100.0)
+        self._click_readout()
+        self._type_and_commit("-5")
+        self.assertEqual(self._dial.value(), 0.0)
+
+    def test_typing_a_non_number_is_rejected(self):
+        self._click_readout()
+        self._type_and_commit("abc")
+        # The value is untouched, and the editor stays open with
+        # the text selected, so the mistake can be fixed in
+        # place.
+        self.assertEqual(self._dial.value(), 50.0)
+        self.assertTrue(self._dial.is_editing())
+        self.assertEqual(self._dial._editor.selectedText(), "abc")
+        # And a good value typed over it still commits.
+        self._type_and_commit("7")
+        self.assertEqual(self._dial.value(), 7.0)
+
+    def test_typing_accepts_a_decimal_and_a_pasted_unit(self):
+        dial = self.Dial(0.0, 200.0, 0.5, value=10.0, unit="cm",
+                         parent=self._host)
+        dial.resize(dial.sizeHint())
+        dial.move(10, 10)
+        dial.show()
+        self._pump()
+        from PySide6.QtTest import QTest
+        from PySide6 import QtCore
+        point = QtCore.QPoint(dial.width() // 2, dial.height() - 11)
+        QTest.mouseClick(dial, QtCore.Qt.LeftButton,
+                         QtCore.Qt.NoModifier, point)
+        self._pump()
+        QTest.keyClicks(dial._editor, "42.5 cm")
+        QTest.keyClick(dial._editor, QtCore.Qt.Key_Return)
+        self._pump()
+        # No snapping to the 0.5 step: 42.5 stays 42.5.
+        self.assertEqual(dial.value(), 42.5)
+
+    def test_arrow_keys_adjust_by_the_step(self):
+        from PySide6.QtTest import QTest
+        from PySide6 import QtCore
+        self._dial.setFocus()
+        QTest.keyClick(self._dial, QtCore.Qt.Key_Up)
+        self.assertEqual(self._dial.value(), 51.0)
+        QTest.keyClick(self._dial, QtCore.Qt.Key_Right)
+        self.assertEqual(self._dial.value(), 52.0)
+        QTest.keyClick(self._dial, QtCore.Qt.Key_Down)
+        self.assertEqual(self._dial.value(), 51.0)
+        QTest.keyClick(self._dial, QtCore.Qt.Key_Left)
+        self.assertEqual(self._dial.value(), 50.0)
+
+    def test_arrow_keys_clamp_at_the_ends(self):
+        from PySide6.QtTest import QTest
+        from PySide6 import QtCore
+        self._dial.setValue(100.0)
+        self._dial.setFocus()
+        QTest.keyClick(self._dial, QtCore.Qt.Key_Up)
+        self.assertEqual(self._dial.value(), 100.0)
+        self._dial.setValue(0.0)
+        QTest.keyClick(self._dial, QtCore.Qt.Key_Down)
+        self.assertEqual(self._dial.value(), 0.0)
+
+    def test_escape_cancels_a_drag(self):
+        from PySide6.QtTest import QTest
+        from PySide6 import QtCore
+        start = self._centre()
+        QTest.mousePress(self._dial, QtCore.Qt.LeftButton,
+                         QtCore.Qt.NoModifier, start)
+        QTest.mouseMove(self._dial, start - QtCore.QPoint(0, 50), 30)
+        self.assertAlmostEqual(self._dial.value(), 75.0, places=6)
+        QTest.keyClick(self._dial, QtCore.Qt.Key_Escape)
+        QTest.mouseRelease(self._dial, QtCore.Qt.LeftButton,
+                           QtCore.Qt.NoModifier,
+                           start - QtCore.QPoint(0, 50))
+        self._pump()
+        # Back to the pre-drag value — and the release did not
+        # open the editor, since the drag was cancelled, not
+        # clicked.
+        self.assertEqual(self._dial.value(), 50.0)
+        self.assertFalse(self._dial.is_editing())
+
+    def test_escape_at_rest_changes_nothing(self):
+        from PySide6.QtTest import QTest
+        from PySide6 import QtCore
+        self._dial.setFocus()
+        QTest.keyClick(self._dial, QtCore.Qt.Key_Escape)
+        self.assertEqual(self._dial.value(), 50.0)
+        self.assertFalse(self._dial.is_editing())
+
+    def test_escape_in_the_editor_cancels_the_edit(self):
+        from PySide6.QtTest import QTest
+        from PySide6 import QtCore
+        self._click_readout()
+        self.assertTrue(self._dial.is_editing())
+        QTest.keyClicks(self._dial._editor, "99")
+        QTest.keyClick(self._dial._editor, QtCore.Qt.Key_Escape)
+        self._pump()
+        self.assertFalse(self._dial.is_editing())
+        self.assertEqual(self._dial.value(), 50.0)
+
+    def test_paints_without_error(self):
+        self._dial.show()
+        self._pump()
+        pixmap = self._dial.grab()
+        self.assertFalse(pixmap.isNull())
+        self.assertEqual(pixmap.size(), self._dial.size())
+        # A second grab at another value paints too (the arc
+        # moves with the value).
+        self._dial.setValue(12.0)
+        self._pump()
+        pixmap = self._dial.grab()
+        self.assertFalse(pixmap.isNull())
+
+    def test_value_changed_signal_fires_on_change_only(self):
+        received = []
+        self._dial.valueChanged.connect(received.append)
+        self._dial.setValue(42.0)
+        self.assertEqual(received, [42.0])
+        self._dial.setValue(42.0)  # no change, no signal
+        self.assertEqual(received, [42.0])
+        self._dial.setValue(200.0)  # clamps, emits the clamped value
+        self.assertEqual(received, [42.0, 100.0])
+
+    def test_set_value_clamps_and_ignores_non_finite(self):
+        self._dial.setValue(150.0)
+        self.assertEqual(self._dial.value(), 100.0)
+        self._dial.setValue(-10.0)
+        self.assertEqual(self._dial.value(), 0.0)
+        self._dial.setValue(float("nan"))
+        self.assertEqual(self._dial.value(), 0.0)
+
+    def test_bad_range_and_step_are_rejected(self):
+        with self.assertRaises(ValueError):
+            self.Dial(10.0, 5.0, 1.0)
+        with self.assertRaises(ValueError):
+            self.Dial(0.0, 100.0, 0.0)
+        with self.assertRaises(ValueError):
+            self.Dial(0.0, 100.0, -1.0)
+        with self.assertRaises(ValueError):
+            self._dial.setRange(10.0, 5.0)
+        with self.assertRaises(ValueError):
+            self._dial.setStep(0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
