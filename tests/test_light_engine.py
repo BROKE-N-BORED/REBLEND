@@ -13124,5 +13124,124 @@ class QtPieMenuTests(unittest.TestCase):
         window.close()
 
 
+@unittest.skipUnless(QT_TESTS, "Qt tests need LIGHT_ENGINE_QT_TESTS=1")
+class QtFireGhostRegressionTests(unittest.TestCase):
+    """F-FIRE: an additive-preset emitter (Fire, Sparks) must not
+    ghost the viewport. The bug: the particle pass left the
+    additive blend func behind and Qt hands paintGL a context
+    with blending enabled, so from the next frame on the opaque
+    passes added instead of replacing — the whole frame washed
+    out (+18 mean brightness, blown-white pixels) and stayed
+    broken after the emitter was deleted. The old T17 checks
+    only looked at particle pixels, which is why it was never
+    caught: these check the WHOLE frame, the audit's method."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6 import QtWidgets
+        cls._app = QtWidgets.QApplication.instance()
+        if cls._app is None:
+            cls._app = QtWidgets.QApplication([])
+        from light_engine.window import MainWindow
+        cls.MainWindow = MainWindow
+
+    def _pump(self, rounds=10):
+        from PySide6 import QtCore, QtWidgets
+        for _ in range(rounds):
+            QtWidgets.QApplication.processEvents()
+            QtCore.QThread.msleep(50)
+
+    def _paint_once(self, viewport):
+        # update() + a short pump drives exactly one paint (the
+        # tuner tests' finding: back-to-back repaint() calls do
+        # not — the second is a no-op when nothing invalidated).
+        from PySide6 import QtCore, QtWidgets
+        viewport.update()
+        for _ in range(2):
+            QtWidgets.QApplication.processEvents()
+            QtCore.QThread.msleep(10)
+
+    def _frame_stats(self, window):
+        """(mean brightness 0-255, blown-white pixel fraction) of
+        the whole viewport frame."""
+        from PySide6 import QtGui
+        image = window._viewport.grabFramebuffer()
+        rgb = image.convertToFormat(QtGui.QImage.Format_RGB888)
+        raw = bytes(rgb.constBits())
+        mean = sum(raw) / len(raw)
+        blown = sum(1 for i in range(0, len(raw), 3)
+                    if raw[i] >= 250 and raw[i + 1] >= 250
+                    and raw[i + 2] >= 250) / (len(raw) // 3)
+        return mean, blown
+
+    def _open_tavern(self):
+        window = self.MainWindow(
+            scene=scene_mod.load_scene(str(EXAMPLE)))
+        window.resize(800, 600)
+        window.show()
+        self._pump()
+        return window
+
+    def _check_preset_keeps_frame_opaque(self, window, add_emitter):
+        """The regression check for one additive preset: the frame
+        with live particles, and the frame after the emitter is
+        deleted, must both stay within a small band of the clean
+        frame. Measured on the fixed build: Fire adds 0.1 mean
+        brightness (the particles themselves); the ghost added
+        18.4 with 0.4% blown pixels — the bands below sit far
+        from both."""
+        vp = window._viewport
+        with vp.full_quality():
+            for _ in range(3):
+                self._paint_once(vp)
+            clean_mean, clean_blown = self._frame_stats(window)
+            add_emitter()
+            window.set_frame(24)
+            for _ in range(3):
+                self._paint_once(vp)
+            self.assertGreater(vp._particle_count, 0,
+                               "no live particles — the check "
+                               "would pass vacuously")
+            live_mean, live_blown = self._frame_stats(window)
+            self.assertLess(live_mean, clean_mean + 5.0,
+                            "frame washed out with the emitter live")
+            self.assertLess(live_blown, 0.001,
+                            "blown-white pixels with the emitter live")
+            window._delete_selected()
+            for _ in range(3):
+                self._paint_once(vp)
+            gone_mean, gone_blown = self._frame_stats(window)
+            self.assertLess(gone_mean, clean_mean + 2.0,
+                            "frame stayed washed out after deleting "
+                            "the emitter")
+            self.assertLess(gone_blown, 0.001,
+                            "blown-white pixels after deleting the "
+                            "emitter")
+        self.assertLess(clean_blown, 0.001,
+                        "clean frame already has blown pixels")
+
+    def test_fire_emitter_keeps_frame_opaque(self):
+        window = self._open_tavern()
+        self._check_preset_keeps_frame_opaque(
+            window, window._add_emitter)
+        window.close()
+
+    def test_sparks_emitter_keeps_frame_opaque(self):
+        from light_engine import particles as particles_mod
+        from light_engine.scene import new_emitter
+        window = self._open_tavern()
+
+        def add_sparks():
+            emitter = new_emitter("Emitter sparks")
+            emitter["emitter"] = particles_mod.apply_preset(
+                None, "sparks")
+            window.scene["objects"].append(emitter)
+            window._select(emitter["id"])
+            window._viewport.refresh()
+
+        self._check_preset_keeps_frame_opaque(window, add_sparks)
+        window.close()
+
+
 if __name__ == "__main__":
     unittest.main()

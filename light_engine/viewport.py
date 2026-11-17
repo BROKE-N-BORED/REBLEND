@@ -988,6 +988,18 @@ class Viewport(QOpenGLWidget):
         # Test hook (UI11): a slow scene, simulated.
         if self._paint_delay:
             time.sleep(self._paint_delay)
+        # Base GL state (F-FIRE): Qt hands paintGL a context with
+        # blending ENABLED — its own compositing uses it and never
+        # turns it off — and the particle pass used to leave the
+        # additive blend func behind, so from the next frame on the
+        # opaque passes added instead of replacing and the whole
+        # viewport ghosted (brighter, blown white, see-through).
+        # Every frame re-asserts its own base state here, so no
+        # frame depends on what Qt or a previous frame left.
+        gl.glDisable(GL_BLEND)
+        gl.glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        gl.glDepthMask(True)
+        gl.glEnable(GL_DEPTH_TEST)
         # The effective quality may have changed since the last
         # paint (a tuner step, or an export override): the shadow
         # map is rebuilt lazily here, where the context is current.
@@ -1701,6 +1713,10 @@ class Viewport(QOpenGLWidget):
             gl.glDrawArrays(GL_POINTS, data["alpha_count"],
                             data["additive_count"])
         vao.release()
+        # The blend function is sticky state too: restore it with
+        # the enable and the depth mask, so the additive func never
+        # leaks into the next frame (F-FIRE).
+        gl.glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         gl.glDisable(GL_BLEND)
         gl.glDepthMask(True)
         prog.release()
