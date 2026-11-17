@@ -471,10 +471,24 @@ class MaterialLibraryTests(unittest.TestCase):
     def test_every_style_entry_is_complete(self):
         for key, entry in textures.STYLES.items():
             self.assertEqual(set(entry),
-                             {"family", "display", "params", "layouts",
-                              "wear"}, key)
+                             {"family", "display", "base_color",
+                              "roughness", "metalness", "params",
+                              "layouts", "wear"}, key)
             self.assertIn(entry["family"],
                           [f for f, _ in textures.FAMILIES], key)
+            # The look (F-COLOR): a real hex color, and roughness
+            # / metalness numbers in range.
+            color = entry["base_color"]
+            self.assertEqual(len(color), 7, key)
+            self.assertTrue(color.startswith("#"), key)
+            int(color[1:], 16)
+            for look_key in ("roughness", "metalness"):
+                self.assertIsInstance(entry[look_key],
+                                      (int, float), (key, look_key))
+                self.assertGreaterEqual(entry[look_key], 0.0,
+                                        (key, look_key))
+                self.assertLessEqual(entry[look_key], 1.0,
+                                     (key, look_key))
             self.assertNotIn("\u2014", entry["display"], key)
             self.assertNotIn("&", entry["display"], key)
             self.assertTrue(entry["params"], key)
@@ -11378,11 +11392,11 @@ class QtMaterialPreviewTests(unittest.TestCase):
             self._hover(window, combo, "wood_cathedral",
                         ("mug", {"texture": "wood_cathedral",
                                  "style": "wood_cathedral",
-                                 "params": {}, "wear": {}}))
+                                 "params": {}, "wear": {}, "base_color": "#8a5a2b", "roughness": 0.7, "metalness": 0.0}))
             self.assertEqual(window._viewport._material_preview,
                              ("mug", {"texture": "wood_cathedral",
                                       "style": "wood_cathedral",
-                                      "params": {}, "wear": {}}))
+                                      "params": {}, "wear": {}, "base_color": "#8a5a2b", "roughness": 0.7, "metalness": 0.0}))
             self.assertEqual(self._material(window)["texture"], "none")
             self.assertNotEqual(self._render_bytes(window, tmp), before)
             combo.hidePopup()
@@ -11564,11 +11578,11 @@ class QtMaterialLibraryTests(unittest.TestCase):
         self._hover(window, combo, "stone_granite",
                     ("mug", {"texture": "stone_granite",
                              "style": "stone_granite",
-                             "params": {}, "wear": {}}))
+                             "params": {}, "wear": {}, "base_color": "#8a8a8f", "roughness": 0.7, "metalness": 0.0}))
         self.assertEqual(window._viewport._material_preview,
                          ("mug", {"texture": "stone_granite",
                                   "style": "stone_granite",
-                                  "params": {}, "wear": {}}))
+                                  "params": {}, "wear": {}, "base_color": "#8a8a8f", "roughness": 0.7, "metalness": 0.0}))
         # A family header carries no data: highlighting it ends
         # the preview (called directly — Qt does not reliably
         # fire the highlight signal for a disabled item under a
@@ -11904,11 +11918,11 @@ class QtMaterialParamsTests(unittest.TestCase):
             self._hover(window, combo, "brick_stretcher",
                         ("mug", {"texture": "brick_stretcher",
                                  "style": "brick_stretcher",
-                                 "params": {}, "wear": {}}))
+                                 "params": {}, "wear": {}, "base_color": "#9a4a32", "roughness": 0.95, "metalness": 0.0}))
             self.assertEqual(window._viewport._material_preview,
                              ("mug", {"texture": "brick_stretcher",
                                       "style": "brick_stretcher",
-                                      "params": {}, "wear": {}}))
+                                      "params": {}, "wear": {}, "base_color": "#9a4a32", "roughness": 0.95, "metalness": 0.0}))
             self.assertNotEqual(self._render_bytes(window, tmp), before)
             combo.hidePopup()
             self._pump(rounds=4)
@@ -12148,11 +12162,11 @@ class QtMaterialSimpleAdvancedTests(unittest.TestCase):
             self._hover(window, combo, "brick_stretcher",
                         ("mug", {"texture": "brick_stretcher",
                                  "style": "brick_stretcher",
-                                 "params": {}, "wear": {}}))
+                                 "params": {}, "wear": {}, "base_color": "#9a4a32", "roughness": 0.95, "metalness": 0.0}))
             self.assertEqual(window._viewport._material_preview,
                              ("mug", {"texture": "brick_stretcher",
                                       "style": "brick_stretcher",
-                                      "params": {}, "wear": {}}))
+                                      "params": {}, "wear": {}, "base_color": "#9a4a32", "roughness": 0.95, "metalness": 0.0}))
             self.assertNotEqual(self._render_bytes(window, tmp), before)
             combo.hidePopup()
             self._pump(rounds=4)
@@ -12163,11 +12177,11 @@ class QtMaterialSimpleAdvancedTests(unittest.TestCase):
             self._hover(window, combo, "stone_marble_carrara",
                         ("mug", {"texture": "stone_marble_carrara",
                                  "style": "stone_marble_carrara",
-                                 "params": {}, "wear": {}}))
+                                 "params": {}, "wear": {}, "base_color": "#f0f0ea", "roughness": 0.35, "metalness": 0.0}))
             self.assertEqual(window._viewport._material_preview,
                              ("mug", {"texture": "stone_marble_carrara",
                                       "style": "stone_marble_carrara",
-                                      "params": {}, "wear": {}}))
+                                      "params": {}, "wear": {}, "base_color": "#f0f0ea", "roughness": 0.35, "metalness": 0.0}))
             self.assertNotEqual(self._render_bytes(window, tmp), before)
             combo.hidePopup()
             self._pump(rounds=4)
@@ -12714,11 +12728,11 @@ class QtMaterialWearTests(unittest.TestCase):
             self._hover(window, combo, "brick_stretcher",
                         ("mug", {"texture": "brick_stretcher",
                                  "style": "brick_stretcher",
-                                 "params": {}, "wear": {}}))
+                                 "params": {}, "wear": {}, "base_color": "#9a4a32", "roughness": 0.95, "metalness": 0.0}))
             self.assertEqual(window._viewport._material_preview,
                              ("mug", {"texture": "brick_stretcher",
                                       "style": "brick_stretcher",
-                                      "params": {}, "wear": {}}))
+                                      "params": {}, "wear": {}, "base_color": "#9a4a32", "roughness": 0.95, "metalness": 0.0}))
             self.assertNotEqual(self._render_bytes(window, tmp),
                                 before)
             combo.hidePopup()
@@ -13241,6 +13255,389 @@ class QtFireGhostRegressionTests(unittest.TestCase):
 
         self._check_preset_keeps_frame_opaque(window, add_sparks)
         window.close()
+
+
+@unittest.skipUnless(QT_TESTS, "Qt tests need LIGHT_ENGINE_QT_TESTS=1")
+class QtFColorTests(unittest.TestCase):
+    """F-COLOR: per-style base colors, smoother defaults, and the
+    Z-axis stub. The audit's cheapest, highest-payoff fix: the
+    default base color was light grey and the styles modulated
+    grey, so wood read as brushed metal and brick as concrete.
+    Each style now carries the look its name promises, the
+    default sphere and cylinder are finer, and the full-height
+    blue Z line through the scene is a short stub at the origin.
+    The resolution and geometry checks here are headless-safe,
+    but they live in this Qt class because the pick, preview,
+    and render checks need a window."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6 import QtWidgets
+        cls._app = QtWidgets.QApplication.instance()
+        if cls._app is None:
+            cls._app = QtWidgets.QApplication([])
+        from light_engine.window import MainWindow
+        cls.MainWindow = MainWindow
+
+    def _pump(self, rounds=10):
+        from PySide6 import QtCore, QtWidgets
+        for _ in range(rounds):
+            QtWidgets.QApplication.processEvents()
+            QtCore.QThread.msleep(50)
+
+    def _paint_once(self, viewport):
+        from PySide6 import QtCore, QtWidgets
+        viewport.update()
+        for _ in range(2):
+            QtWidgets.QApplication.processEvents()
+            QtCore.QThread.msleep(10)
+
+    def _show(self, window):
+        window.resize(800, 600)
+        window.show()
+        self._pump()
+
+    def _open_tavern_mug(self):
+        scene = scene_mod.load_scene(str(EXAMPLE))
+        window = self.MainWindow(scene=scene)
+        self._show(window)
+        window._select("mug")
+        return window
+
+    @staticmethod
+    def _rgb(hex_color):
+        return tuple(int(hex_color[i:i + 2], 16) / 255.0
+                     for i in (1, 3, 5))
+
+    def _mean_rgb(self, window):
+        """Mean (r, g, b) in 0-1 over the central 40% square of
+        the viewport frame."""
+        from PySide6 import QtGui
+        image = window._viewport.grabFramebuffer()
+        rgb = image.convertToFormat(QtGui.QImage.Format_RGB888)
+        raw = bytes(rgb.constBits())
+        width, height = rgb.width(), rgb.height()
+        stride = rgb.bytesPerLine()
+        x0, x1 = int(width * 0.3), int(width * 0.7)
+        y0, y1 = int(height * 0.3), int(height * 0.7)
+        total = [0, 0, 0]
+        count = 0
+        for y in range(y0, y1):
+            row = y * stride
+            for x in range(x0, x1):
+                off = row + x * 3
+                total[0] += raw[off]
+                total[1] += raw[off + 1]
+                total[2] += raw[off + 2]
+                count += 1
+        return tuple(t / count / 255.0 for t in total)
+
+    def test_every_style_has_a_distinct_look(self):
+        colors = set()
+        for key in textures.STYLES:
+            look = textures.style_look(key)
+            self.assertEqual(set(look),
+                             {"base_color", "roughness", "metalness"},
+                             key)
+            # No style is the old default grey: the whole point
+            # is that a styled material stops reading as grey.
+            self.assertNotEqual(look["base_color"], "#b0b0b0", key)
+            colors.add(look["base_color"])
+        # Every style its own color — no two share one.
+        self.assertEqual(len(colors), len(textures.STYLES))
+
+    def test_style_colors_are_the_promised_colors(self):
+        # Hue order + rough brightness per style: the color the
+        # name promises, checked on the resolved look (not on
+        # the registry dict directly).
+        oak = self._rgb(
+            textures.style_look("wood_cathedral")["base_color"])
+        self.assertGreater(oak[0], oak[1])
+        self.assertGreater(oak[1], oak[2])
+        self.assertGreater(oak[0], 0.4)
+        brick = self._rgb(
+            textures.style_look("brick_stretcher")["base_color"])
+        self.assertGreater(brick[0], brick[1])
+        self.assertGreater(brick[0] - brick[1], 0.15)
+        marble = self._rgb(
+            textures.style_look("stone_marble_carrara")["base_color"])
+        for channel in marble:
+            self.assertGreater(channel, 0.85)
+        lawn = self._rgb(
+            textures.style_look("ground_lawn")["base_color"])
+        self.assertGreater(lawn[1], lawn[0])
+        self.assertGreater(lawn[1], lawn[2])
+        sand = self._rgb(textures.style_look("ground_sand")["base_color"])
+        self.assertGreater(sand[0], 0.7)
+        self.assertGreater(sand[1], sand[0] - 0.25)
+        slate = self._rgb(
+            textures.style_look("stone_slate")["base_color"])
+        for channel in slate:
+            self.assertLess(channel, 0.45)
+        self.assertGreater(slate[2], slate[0])
+        # Roughness / metalness follow the material: polished
+        # marble is smooth, brick is rough, brushed metal is
+        # metal, rusted metal is mostly not.
+        self.assertLess(
+            textures.style_look("stone_marble_carrara")["roughness"],
+            0.5)
+        self.assertGreater(
+            textures.style_look("brick_stretcher")["roughness"], 0.9)
+        self.assertEqual(
+            textures.style_look("metal_brushed")["metalness"], 1.0)
+        self.assertLess(
+            textures.style_look("metal_rusted")["metalness"], 1.0)
+
+    def test_style_look_resolves_legacy_names_and_none(self):
+        self.assertEqual(textures.style_look("wood_grain"),
+                         textures.style_look("wood_cathedral"))
+        self.assertEqual(textures.style_look("brushed_metal"),
+                         textures.style_look("metal_brushed"))
+        self.assertEqual(textures.style_look("worn_leather"),
+                         textures.style_look("fabric_leather"))
+        self.assertIsNone(textures.style_look("none"))
+        self.assertIsNone(textures.style_look("bogus"))
+        self.assertIsNone(textures.style_look(None))
+        # A copy: tuning the returned dict must not corrupt the
+        # registry.
+        look = textures.style_look("wood_cathedral")
+        look["base_color"] = "#ff0000"
+        self.assertEqual(
+            textures.style_look("wood_cathedral")["base_color"],
+            "#8a5a2b")
+
+    def test_default_material_applies_style_look(self):
+        mat = scene_mod.default_material({"style": "wood_cathedral"})
+        self.assertEqual(mat["base_color"], "#8a5a2b")
+        self.assertEqual(mat["roughness"], 0.7)
+        self.assertEqual(mat["metalness"], 0.0)
+        mat = scene_mod.default_material({"style": "brick_stretcher"})
+        self.assertEqual(mat["base_color"], "#9a4a32")
+        self.assertEqual(mat["roughness"], 0.95)
+        # A legacy texture name maps to its style's look too.
+        mat = scene_mod.default_material({"texture": "wood_grain"})
+        self.assertEqual(mat["base_color"], "#8a5a2b")
+        # No style, no look: the plain default stands.
+        mat = scene_mod.default_material()
+        self.assertEqual(mat["base_color"], "#b0b0b0")
+        self.assertEqual(mat["roughness"], 0.6)
+        self.assertEqual(mat["metalness"], 0.0)
+        mat = scene_mod.default_material({"style": "none"})
+        self.assertEqual(mat["base_color"], "#b0b0b0")
+
+    def test_explicit_look_wins_over_style(self):
+        mat = scene_mod.default_material(
+            {"style": "wood_cathedral", "base_color": "#ff0000",
+             "roughness": 0.1, "metalness": 0.9})
+        self.assertEqual(mat["base_color"], "#ff0000")
+        self.assertEqual(mat["roughness"], 0.1)
+        self.assertEqual(mat["metalness"], 0.9)
+        # Each key is independent: an explicit color with no
+        # roughness gets the style's roughness only.
+        mat = scene_mod.default_material(
+            {"style": "wood_cathedral", "base_color": "#ff0000"})
+        self.assertEqual(mat["base_color"], "#ff0000")
+        self.assertEqual(mat["roughness"], 0.7)
+        self.assertEqual(mat["metalness"], 0.0)
+
+    def test_old_scene_keeps_its_colors(self):
+        # Every tavern object stores its color explicitly, so
+        # the style look must not touch any of them on load.
+        scene = scene_mod.load_scene(str(EXAMPLE))
+        by_id = {obj["id"]: obj for obj in scene["objects"]}
+        self.assertEqual(by_id["floor"]["material"]["base_color"],
+                         "#6b5a44")
+        self.assertEqual(by_id["tabletop"]["material"]["base_color"],
+                         "#8a5a2b")
+        self.assertEqual(by_id["mug"]["material"]["base_color"],
+                         "#7a4a8a")
+        self.assertEqual(by_id["plate"]["material"]["base_color"],
+                         "#c8c8c8")
+        self.assertEqual(by_id["loaf"]["material"]["base_color"],
+                         "#a06a35")
+
+    def test_default_sphere_and_cylinder_segments(self):
+        self.assertEqual(geometry.default_params("sphere"),
+                         {"radius": 50.0, "segments": 32,
+                          "rings": 16})
+        self.assertEqual(geometry.default_params("cylinder"),
+                         {"radius": 50.0, "height": 100.0,
+                          "segments": 32})
+        # Scope pin: the cone keeps its old default — the plan
+        # orders the sphere and the cylinder only.
+        self.assertEqual(geometry.default_params("cone"),
+                         {"radius": 50.0, "height": 100.0,
+                          "segments": 20})
+        self.assertEqual(geometry.default_params("torus"),
+                         {"major_radius": 50.0, "minor_radius": 20.0,
+                          "segments": 24, "sides": 10})
+
+    def test_saved_segments_untouched(self):
+        obj = scene_mod.new_object(
+            "sphere",
+            params={"radius": 50.0, "segments": 20, "rings": 12})
+        self.assertEqual(obj["params"]["segments"], 20)
+        self.assertEqual(obj["params"]["rings"], 12)
+        obj = scene_mod.new_object(
+            "cylinder",
+            params={"radius": 6.0, "height": 71.0, "segments": 12})
+        self.assertEqual(obj["params"]["segments"], 12)
+        # The tavern's legs keep their stored 12 segments on load.
+        scene = scene_mod.load_scene(str(EXAMPLE))
+        leg = scene_mod.find_object(scene, "leg1")
+        self.assertEqual(leg["params"]["segments"], 12)
+
+    def test_default_sphere_has_more_triangles(self):
+        old = geometry.tessellate(
+            "sphere", {"radius": 50.0, "segments": 20, "rings": 12})
+        new = geometry.tessellate(
+            "sphere", geometry.default_params("sphere"))
+        old_tris = len(old["positions"]) // 9
+        new_tris = len(new["positions"]) // 9
+        # 32x16 is just over twice the facets of 20x12.
+        self.assertGreater(new_tris, 2 * old_tris)
+        cylinder_old = geometry.tessellate(
+            "cylinder", {"radius": 50.0, "height": 100.0,
+                         "segments": 20})
+        cylinder_new = geometry.tessellate(
+            "cylinder", geometry.default_params("cylinder"))
+        self.assertGreater(len(cylinder_new["positions"]),
+                           len(cylinder_old["positions"]))
+
+    def test_z_axis_is_a_stub(self):
+        from light_engine import viewport as viewport_mod
+        # The axes are the last three segments in the grid
+        # vertex list, in X, Y, Z order; each segment is 12
+        # floats (two vertices of pos(3) + color(3)).
+        for span in (50.0, 600.0, 2000.0):
+            verts = viewport_mod._grid_verts(span)
+            segments = [verts[i * 12:(i + 1) * 12]
+                        for i in range(len(verts) // 12)]
+            x_axis, y_axis, z_axis = segments[-3:]
+            # X and Y still run 60% of the span on the floor.
+            self.assertEqual(x_axis[6], span * 0.6, span)
+            self.assertEqual(x_axis[8], viewport_mod.GRID_Z, span)
+            self.assertEqual(y_axis[7], span * 0.6, span)
+            self.assertEqual(y_axis[8], viewport_mod.GRID_Z, span)
+            # Z is one grid step tall — a stub, not a line
+            # through the scene (it used to run 60% of the span).
+            step = span / 10.0
+            self.assertEqual(z_axis[0], 0.0, span)
+            self.assertEqual(z_axis[1], 0.0, span)
+            self.assertEqual(z_axis[2], viewport_mod.GRID_Z, span)
+            self.assertEqual(z_axis[6], 0.0, span)
+            self.assertEqual(z_axis[7], 0.0, span)
+            self.assertEqual(z_axis[8],
+                             viewport_mod.GRID_Z + step, span)
+            self.assertLess(step, span * 0.6 / 5.0, span)
+            # The Z stub is blue, as the axis was.
+            self.assertEqual(tuple(z_axis[9:12]), (0.30, 0.45, 0.9),
+                             span)
+
+    def test_strengthened_patterns_have_contrast(self):
+        # The seven flattest styles were raised for F-COLOR
+        # (measured std over a 41x41 grid): each now varies at
+        # least as much as the mid-range styles, so the pattern
+        # reads instead of washing out under the new color.
+        grid = [(u / 40.0, v / 40.0) for u in range(41)
+                for v in range(41)]
+        for key in ("wood_weathered", "stone_limestone",
+                    "concrete_raw", "fabric_wool_loop",
+                    "metal_galvanised", "wood_burl", "stone_slate"):
+            values = [textures.pattern_factor(key, u, v)
+                      for u, v in grid]
+            mean = sum(values) / len(values)
+            std = (sum((x - mean) ** 2 for x in values)
+                   / len(values)) ** 0.5
+            self.assertGreater(std, 0.04, key)
+
+    def test_style_pick_applies_look_in_one_undo_step(self):
+        window = self._open_tavern_mug()
+        mug = scene_mod.find_object(window.scene, "mug")
+        before = dict(mug["material"])
+        combo = window._texture_combo
+        combo.setCurrentIndex(combo.findData("wood_cathedral"))
+        self._pump(rounds=2)
+        mat = mug["material"]
+        self.assertEqual(mat["style"], "wood_cathedral")
+        self.assertEqual(mat["base_color"], "#8a5a2b")
+        self.assertEqual(mat["roughness"], 0.7)
+        self.assertEqual(mat["metalness"], 0.0)
+        # The inspector shows the new look at once.
+        self.assertIn("#8a5a2b",
+                      window._color_swatch.styleSheet())
+        self.assertEqual(window._roughness_slider.value(), 70)
+        self.assertEqual(window._metalness_slider.value(), 0)
+        # One undo step restores the whole pick, look included.
+        # Undo swaps the whole scene, so the mug is re-found —
+        # the old reference points at the pre-undo object.
+        self.assertEqual(len(window._undo_stack), 1)
+        window.undo()
+        mug = scene_mod.find_object(window.scene, "mug")
+        self.assertEqual(mug["material"], before)
+        # Picking "none" leaves the look alone: a plain color is
+        # the user's own choice, not a style's.
+        combo.setCurrentIndex(combo.findData("none"))
+        self._pump(rounds=2)
+        self.assertEqual(mug["material"]["style"], "none")
+        self.assertEqual(mug["material"]["base_color"], "#7a4a8a")
+        window.close()
+
+    def test_hover_preview_shows_style_color(self):
+        window = self._open_tavern_mug()
+        combo = window._texture_combo
+        index = combo.findData("wood_cathedral")
+        window._on_texture_highlighted(index)
+        self.assertEqual(window._viewport._material_preview,
+                         ("mug", {"texture": "wood_cathedral",
+                                  "style": "wood_cathedral",
+                                  "params": {}, "wear": {},
+                                  "base_color": "#8a5a2b",
+                                  "roughness": 0.7,
+                                  "metalness": 0.0}))
+        # The scene is untouched by the hover.
+        mug = scene_mod.find_object(window.scene, "mug")
+        self.assertEqual(mug["material"]["base_color"], "#7a4a8a")
+        self.assertEqual(len(window._undo_stack), 0)
+        # Hovering "none" previews no look: the stored color
+        # shows with no pattern.
+        window._on_texture_highlighted(combo.findData("none"))
+        self.assertEqual(window._viewport._material_preview,
+                         ("mug", {"texture": "none", "style": "none",
+                                  "params": {}, "wear": {}}))
+        window._clear_material_preview()
+        window.close()
+
+    def test_wood_box_renders_brown_and_brick_renders_red(self):
+        # The spec's done-when, in pixels: a wood box renders
+        # brown and a brick cylinder renders red-brown — under
+        # the old grey default both rendered grey (r == g == b).
+        cases = (
+            ("box", {"size": [100.0, 100.0, 100.0]},
+             "wood_cathedral", lambda r, g, b: (r > g > b
+                                               and r - b > 0.08)),
+            ("cylinder", {"radius": 50.0, "height": 100.0,
+                          "segments": 32},
+             "brick_stretcher", lambda r, g, b: (r > g
+                                                 and r - g > 0.10)),
+        )
+        for shape, params, style, check in cases:
+            scene = scene_mod.new_scene("F-COLOR check")
+            obj = scene_mod.new_object(
+                shape, name="Check", params=params,
+                material={"style": style})
+            scene["objects"].append(obj)
+            window = self.MainWindow(scene=scene)
+            self._show(window)
+            vp = window._viewport
+            with vp.full_quality():
+                for _ in range(3):
+                    self._paint_once(vp)
+                r, g, b = self._mean_rgb(window)
+            self.assertTrue(check(r, g, b),
+                            (style, (round(r, 3), round(g, 3),
+                                     round(b, 3))))
+            window.close()
 
 
 if __name__ == "__main__":

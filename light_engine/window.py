@@ -34,7 +34,7 @@ from .textures import (FAMILIES, LAYOUT_DISPLAY, STYLES,
                        count_to_spacing, default_layout,
                        layouts_for_style, merged_layout_size,
                        merged_params, merged_wear, resolve_layout,
-                       spacing_to_count, style_params)
+                       spacing_to_count, style_look, style_params)
 from .viewport import PieMenu, PieSlice, Viewport
 
 SOFT_TRI_BUDGET = 100000
@@ -2403,6 +2403,28 @@ class MainWindow(QtWidgets.QMainWindow):
             # a rusted metal's rust does not follow the material
             # onto a style that cannot rust.
             mat["wear"] = {}
+            # And the style's look (F-COLOR): the base color its
+            # name promises, plus its roughness and metalness, in
+            # the same undo step — oak is brown, brick is
+            # red-brown, so the pick reads as its name at once
+            # instead of as grey with a pattern on it. Picking
+            # "none" leaves the look alone: a plain color is the
+            # user's own choice, not a style's. The swatch and
+            # the two sliders sync at once, under the refreshing
+            # flag so the slider moves push no extra undo steps.
+            look = style_look(text)
+            if look is not None:
+                mat["base_color"] = look["base_color"]
+                mat["roughness"] = look["roughness"]
+                mat["metalness"] = look["metalness"]
+                self._refreshing = True
+                self._color_swatch.setStyleSheet(
+                    f"background: {look['base_color']};")
+                self._roughness_slider.setValue(
+                    int(look["roughness"] * 100))
+                self._metalness_slider.setValue(
+                    int(look["metalness"] * 100))
+                self._refreshing = False
             self._sync_param_rows(mat)
             self._viewport.update()
 
@@ -2440,8 +2462,16 @@ class MainWindow(QtWidgets.QMainWindow):
         # returns the stored params, untouched in the scene.
         # Wear pins the same way (PO5): the previewed style
         # shows clean, and the stored wear survives the hover.
-        self._preview_material({"texture": name, "style": name,
-                                "params": {}, "wear": {}})
+        # The look previews too (F-COLOR): the style's color,
+        # roughness, and metalness ride in the override, so the
+        # hover shows oak as brown — "none" has no look, so a
+        # hover over it shows the stored color with no pattern.
+        overrides = {"texture": name, "style": name,
+                     "params": {}, "wear": {}}
+        look = style_look(name)
+        if look is not None:
+            overrides.update(look)
+        self._preview_material(overrides)
 
     def _on_material_preset_highlighted(self, index):
         # Hovering a preset previews its look (UI12, entry 017):

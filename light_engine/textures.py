@@ -16,6 +16,16 @@ function to _PATTERNS — nothing else needs to know about it. The
 material dict stores the style key (see scene.py); the three pre-PO1
 texture names still resolve through LEGACY_TEXTURE_MAP, so old scenes
 load with the matching new style and render exactly as before.
+
+F-COLOR: each style also carries its look — the base color its name
+promises (oak is brown, brick is red-brown, marble is near-white),
+plus the roughness and metalness the material would have — so a
+styled material reads as its name instead of as grey with a pattern
+on it. style_look is the single read path; scene.default_material
+applies the look when a material names a style but carries no
+explicit color of its own, and the texture picker applies it on
+pick. An explicit base color always wins, so old scenes and a
+user's custom colors are untouched.
 """
 from __future__ import annotations
 
@@ -112,16 +122,25 @@ LAYOUT_GAP_CM = 0.5
 WEAR_TYPES = ("dirt", "grime", "edge_wear", "rust", "moss",
               "wetness", "cracks")
 
-# The style registry. Each style: family, display name, parameter
-# defaults (PO2 exposes these as knobs; pattern_factor merges a
-# caller's params over these), and the layouts + wear that apply.
-# Parameter meanings are per style — the pattern function documents
-# its own. Keep every pattern's factor in roughly [0.6, 1.15]: the
-# suite pins the range, and a pattern that clips to black or white
-# reads as broken, not as a material.
+# The style registry. Each style: family, display name, the look
+# (F-COLOR: base_color, roughness, metalness — the color the name
+# promises), parameter defaults (PO2 exposes these as knobs;
+# pattern_factor merges a caller's params over these), and the
+# layouts + wear that apply. Parameter meanings are per style —
+# the pattern function documents its own. Keep every pattern's
+# factor in roughly [0.6, 1.15]: the suite pins the range, and a
+# pattern that clips to black or white reads as broken, not as a
+# material. The strength defaults on the flattest styles were
+# raised for F-COLOR (measured factor std over a 41x41 grid:
+# weathered wood 0.016 -> 0.042, limestone 0.028 -> 0.050,
+# raw concrete 0.028 -> 0.043, wool loop 0.031 -> 0.047,
+# galvanised 0.035 -> 0.048, burl 0.035 -> 0.048, slate
+# 0.037 -> 0.048) — the three legacy styles keep their golden
+# defaults, and every factor stays inside the pinned range.
 STYLES = {
     "wood_cathedral": {
         "family": "wood", "display": "Cathedral oak",
+        "base_color": "#8a5a2b", "roughness": 0.7, "metalness": 0.0,
         "params": {"strength": 0.3, "rings": 14.0, "wobble": 3.0},
         "layouts": ("solid", "boards", "parquet", "chevron",
                     "herringbone", "strip"),
@@ -129,6 +148,7 @@ STYLES = {
     },
     "wood_knotty_pine": {
         "family": "wood", "display": "Knotty pine",
+        "base_color": "#c8a06a", "roughness": 0.75, "metalness": 0.0,
         "params": {"strength": 0.35, "rings": 8.0},
         "layouts": ("solid", "boards", "parquet", "chevron",
                     "herringbone", "strip"),
@@ -136,19 +156,22 @@ STYLES = {
     },
     "wood_burl": {
         "family": "wood", "display": "Burl",
-        "params": {"strength": 0.4, "rings": 22.0, "wobble": 8.0},
+        "base_color": "#6e4520", "roughness": 0.6, "metalness": 0.0,
+        "params": {"strength": 0.55, "rings": 22.0, "wobble": 8.0},
         "layouts": ("solid", "boards", "strip"),
         "wear": ("dirt", "grime", "edge_wear", "moss", "wetness"),
     },
     "wood_weathered": {
         "family": "wood", "display": "Weathered wood",
-        "params": {"strength": 0.35},
+        "base_color": "#9a938a", "roughness": 0.9, "metalness": 0.0,
+        "params": {"strength": 0.9},
         "layouts": ("solid", "boards", "parquet", "chevron",
                     "herringbone", "strip"),
         "wear": ("dirt", "grime", "edge_wear", "moss", "wetness"),
     },
     "stone_granite": {
         "family": "stone", "display": "Granite",
+        "base_color": "#8a8a8f", "roughness": 0.7, "metalness": 0.0,
         "params": {"speckle": 0.18, "blotch": 0.08},
         "layouts": ("solid", "slab"),
         "wear": ("dirt", "grime", "edge_wear", "moss", "cracks",
@@ -156,13 +179,15 @@ STYLES = {
     },
     "stone_limestone": {
         "family": "stone", "display": "Limestone",
-        "params": {"strength": 1.0},
+        "base_color": "#d8d0b8", "roughness": 0.9, "metalness": 0.0,
+        "params": {"strength": 1.8},
         "layouts": ("solid", "slab"),
         "wear": ("dirt", "grime", "edge_wear", "moss", "cracks",
                  "wetness"),
     },
     "stone_marble_carrara": {
         "family": "stone", "display": "Carrara marble",
+        "base_color": "#f0f0ea", "roughness": 0.35, "metalness": 0.0,
         "params": {"veins": 0.3, "bands": 3.0, "warp": 5.0},
         "layouts": ("solid", "slab"),
         "wear": ("dirt", "grime", "edge_wear", "moss", "cracks",
@@ -170,13 +195,15 @@ STYLES = {
     },
     "stone_slate": {
         "family": "stone", "display": "Slate",
-        "params": {"layers": 12.0, "strength": 0.5},
+        "base_color": "#4a5560", "roughness": 0.8, "metalness": 0.0,
+        "params": {"layers": 12.0, "strength": 0.65},
         "layouts": ("solid", "slab", "strip"),
         "wear": ("dirt", "grime", "edge_wear", "moss", "cracks",
                  "wetness"),
     },
     "brick_stretcher": {
         "family": "brick", "display": "Stretcher brick",
+        "base_color": "#9a4a32", "roughness": 0.95, "metalness": 0.0,
         "params": {"rows": 8.0, "cols": 4.0, "mortar": 0.06,
                    "variation": 0.15},
         "layouts": ("stretcher", "flemish", "english",
@@ -186,13 +213,15 @@ STYLES = {
     },
     "concrete_raw": {
         "family": "brick", "display": "Raw concrete",
-        "params": {"strength": 1.0, "pits": 0.06},
+        "base_color": "#b8b8b0", "roughness": 0.95, "metalness": 0.0,
+        "params": {"strength": 1.8, "pits": 0.06},
         "layouts": ("solid", "slab"),
         "wear": ("dirt", "grime", "edge_wear", "moss", "cracks",
                  "wetness"),
     },
     "concrete_aged": {
         "family": "brick", "display": "Aged concrete",
+        "base_color": "#8f8a7a", "roughness": 1.0, "metalness": 0.0,
         "params": {"stains": 0.2, "strength": 0.06},
         "layouts": ("solid", "slab"),
         "wear": ("dirt", "grime", "edge_wear", "moss", "cracks",
@@ -200,54 +229,63 @@ STYLES = {
     },
     "metal_brushed": {
         "family": "metal", "display": "Brushed metal",
+        "base_color": "#b0b0b8", "roughness": 0.35, "metalness": 1.0,
         "params": {"streak": 0.12, "fine": 0.06},
         "layouts": ("solid",),
         "wear": ("dirt", "grime", "edge_wear", "rust", "wetness"),
     },
     "metal_rusted": {
         "family": "metal", "display": "Rusted metal",
+        "base_color": "#8a4426", "roughness": 0.8, "metalness": 0.4,
         "params": {"rust": 0.35, "patches": 4.0},
         "layouts": ("solid",),
         "wear": ("dirt", "grime", "edge_wear", "rust", "wetness"),
     },
     "metal_galvanised": {
         "family": "metal", "display": "Galvanised metal",
-        "params": {"spangle": 6.0, "strength": 1.0},
+        "base_color": "#a8b0b8", "roughness": 0.45, "metalness": 1.0,
+        "params": {"spangle": 6.0, "strength": 1.4},
         "layouts": ("solid",),
         "wear": ("dirt", "grime", "edge_wear", "rust", "wetness"),
     },
     "fabric_canvas": {
         "family": "fabric", "display": "Canvas",
+        "base_color": "#c8b898", "roughness": 1.0, "metalness": 0.0,
         "params": {"threads": 24.0, "strength": 1.0},
         "layouts": ("solid",),
         "wear": ("dirt", "grime", "wetness"),
     },
     "fabric_wool_loop": {
         "family": "fabric", "display": "Wool loop",
-        "params": {"loops": 16.0, "strength": 1.0},
+        "base_color": "#d8d0c0", "roughness": 1.0, "metalness": 0.0,
+        "params": {"loops": 16.0, "strength": 1.5},
         "layouts": ("solid",),
         "wear": ("dirt", "grime", "wetness"),
     },
     "fabric_leather": {
         "family": "fabric", "display": "Worn leather",
+        "base_color": "#7d5233", "roughness": 0.7, "metalness": 0.0,
         "params": {"blotch": 0.16, "crease": 0.10},
         "layouts": ("solid",),
         "wear": ("dirt", "grime", "wetness"),
     },
     "ground_lawn": {
         "family": "ground", "display": "Lawn",
+        "base_color": "#4a7a2a", "roughness": 1.0, "metalness": 0.0,
         "params": {"blades": 0.15, "stripes": 4.0},
         "layouts": ("solid",),
         "wear": ("dirt", "grime", "moss", "wetness"),
     },
     "ground_soil": {
         "family": "ground", "display": "Soil",
+        "base_color": "#4a3520", "roughness": 1.0, "metalness": 0.0,
         "params": {"strength": 1.0, "clumps": 6.0},
         "layouts": ("solid",),
         "wear": ("dirt", "grime", "moss", "wetness"),
     },
     "ground_sand": {
         "family": "ground", "display": "Sand",
+        "base_color": "#d8c890", "roughness": 1.0, "metalness": 0.0,
         "params": {"ripples": 30.0, "strength": 1.0},
         "layouts": ("solid",),
         "wear": ("dirt", "grime", "moss", "wetness"),
@@ -322,6 +360,22 @@ def style_params(style):
     Unknown styles get an empty dict."""
     entry = STYLES.get(resolve_style(style))
     return dict(entry["params"]) if entry else {}
+
+
+def style_look(style):
+    """A style's look (F-COLOR): {"base_color", "roughness",
+    "metalness"} — the color the style's name promises, plus the
+    roughness and metalness the material would have. A fresh
+    dict, so a caller cannot corrupt the registry. The name
+    resolves through resolve_style, so the three pre-PO1 names
+    return their style's look. "none" and unknown styles have
+    no look: None, so a plain color stays the user's own."""
+    entry = STYLES.get(resolve_style(style))
+    if entry is None:
+        return None
+    return {"base_color": entry["base_color"],
+            "roughness": entry["roughness"],
+            "metalness": entry["metalness"]}
 
 
 def merged_params(style, params=None):

@@ -107,6 +107,7 @@ if [ "$LIGHT_ENGINE_QT_TESTS" = "1" ]; then
   run "C24 QtMaterialWear" test_light_engine.QtMaterialWearTests
   run "C25 QtPieMenu" test_light_engine.QtPieMenuTests
   run "C26 QtFireGhost" test_light_engine.QtFireGhostRegressionTests
+  run "C27 QtFColor" test_light_engine.QtFColorTests
 fi
 if [ "$fail" = "0" ]; then
   echo "All groups passed."

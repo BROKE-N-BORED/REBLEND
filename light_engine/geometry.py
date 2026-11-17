@@ -286,9 +286,14 @@ def default_params(shape: str) -> dict:
     if shape == "plane":
         return {"size": [400.0, 400.0]}
     if shape == "sphere":
-        return {"radius": 50.0, "segments": 20, "rings": 12}
+        # F-COLOR: 32x16 — the old 20x12 faceted visibly on every
+        # curved silhouette, and the whole tavern is 1,674 tris,
+        # so the headroom is there. A saved scene keeps its own
+        # numbers; only the default moves.
+        return {"radius": 50.0, "segments": 32, "rings": 16}
     if shape == "cylinder":
-        return {"radius": 50.0, "height": 100.0, "segments": 20}
+        # F-COLOR: 32 segments, same reason as the sphere.
+        return {"radius": 50.0, "height": 100.0, "segments": 32}
     if shape == "cone":
         return {"radius": 50.0, "height": 100.0, "segments": 20}
     if shape == "torus":

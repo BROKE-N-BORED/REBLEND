@@ -272,6 +272,37 @@ def _line_vao(gl, vertices):
     return vao, buf, len(flat) // 6
 
 
+def _grid_verts(span):
+    """Grid + axes vertices for a scene span: interleaved pos(3) +
+    color(3) floats, two vertices per line segment. Pure (no GL),
+    so the suite can check the geometry without a context. The
+    grid is 10 cells across the span, 20% larger than the span
+    each way. The X (red) and Y (green) axes lie on the floor
+    and run 60% of the span — they are orientation cues, not
+    clutter. The Z (blue) axis is a stub one grid step tall
+    (F-COLOR): it used to run 60% of the span straight up through
+    the middle of the scene, and a new user read the full-height
+    blue line as a rendering bug. A stub at the origin still
+    says which way is up without cutting through anything."""
+    step = span / 10.0
+    half = span * 1.2
+    grid_rgb = (0.25, 0.25, 0.28)
+    verts = []
+    n = int(half / step)
+    for i in range(-n, n + 1):
+        verts += [i * step, -half, GRID_Z, *grid_rgb,
+                  i * step, half, GRID_Z, *grid_rgb,
+                  -half, i * step, GRID_Z, *grid_rgb,
+                  half, i * step, GRID_Z, *grid_rgb]
+    # Axes: X red, Y green, Z blue (a stub, not a line).
+    for color, end in (((0.85, 0.25, 0.25), (span * 0.6, 0.0, GRID_Z)),
+                       ((0.25, 0.75, 0.30), (0.0, span * 0.6, GRID_Z)),
+                       ((0.30, 0.45, 0.9), (0.0, 0.0, GRID_Z + step))):
+        verts += [0.0, 0.0, GRID_Z, *color,
+                  end[0], end[1], end[2], *color]
+    return verts
+
+
 class Viewport(QOpenGLWidget):
     object_selected = QtCore.Signal(str)  # object id, or "" for none
     # Fired on every gizmo-drag step (T13): the window refreshes the
@@ -1497,23 +1528,7 @@ class Viewport(QOpenGLWidget):
                 self._grid[1].destroy()
             except Exception:
                 pass
-        step = span / 10.0
-        half = span * 1.2
-        grid_rgb = (0.25, 0.25, 0.28)
-        verts = []
-        n = int(half / step)
-        for i in range(-n, n + 1):
-            verts += [i * step, -half, GRID_Z, *grid_rgb,
-                      i * step, half, GRID_Z, *grid_rgb,
-                      -half, i * step, GRID_Z, *grid_rgb,
-                      half, i * step, GRID_Z, *grid_rgb]
-        # Axes: X red, Y green, Z blue.
-        for color, end in (((0.85, 0.25, 0.25), (span * 0.6, 0.0, GRID_Z)),
-                           ((0.25, 0.75, 0.30), (0.0, span * 0.6, GRID_Z)),
-                           ((0.30, 0.45, 0.9), (0.0, 0.0, span * 0.6))):
-            verts += [0.0, 0.0, GRID_Z, *color,
-                      end[0], end[1], end[2], *color]
-        vao, buf, count = _line_vao(self._gl, verts)
+        vao, buf, count = _line_vao(self._gl, _grid_verts(span))
         self._grid = (vao, buf, count, span)
         return self._grid
 

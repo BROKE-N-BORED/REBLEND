@@ -65,7 +65,8 @@ import os
 import uuid
 
 from .geometry import default_params
-from .textures import LEGACY_TEXTURE_MAP, STYLES, resolve_layout
+from .textures import (LEGACY_TEXTURE_MAP, STYLES, resolve_layout,
+                        style_look)
 
 # Every texture value a material may carry: "none" plus every style
 # key in the PO1 library.
@@ -375,6 +376,24 @@ def default_material(overrides=None):
     # maps to its style here (see resolve_material_style).
     mat["style"] = resolve_material_style(overrides)
     mat["texture"] = mat["style"]
+    # A style's look (F-COLOR): when the material names a style
+    # but carries no explicit look of its own, the style supplies
+    # it — oak is brown, brick is red-brown — so a styled
+    # material reads as its name instead of as grey with a
+    # pattern on it. An explicit base_color / roughness /
+    # metalness always wins: old scenes store all three, so they
+    # render exactly as before, and a user's custom color
+    # survives. Each key is independent — a material with an
+    # explicit color but no roughness gets the style's roughness
+    # only. A style-less material keeps the grey default.
+    if mat["style"] in STYLES:
+        look = style_look(mat["style"])
+        if not overrides or "base_color" not in overrides:
+            mat["base_color"] = look["base_color"]
+        if not overrides or "roughness" not in overrides:
+            mat["roughness"] = look["roughness"]
+        if not overrides or "metalness" not in overrides:
+            mat["metalness"] = look["metalness"]
     # "layout" (PO4): how the pattern is laid, in real centimetres.
     # Resolved against the style, so a stored layout from another
     # style (or a mistyped one) becomes the style's default —
