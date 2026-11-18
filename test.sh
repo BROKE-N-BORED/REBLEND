@@ -43,7 +43,8 @@ run "A2 headless" \
   test_light_engine.MaterialLibraryTests \
   test_light_engine.MaterialParamsTests \
   test_light_engine.MaterialLayoutsTests \
-  test_light_engine.MaterialWearTests
+  test_light_engine.MaterialWearTests \
+  test_light_engine.UpdaterTests
 run "B2 headless" \
   test_light_engine.ObjImportTests test_light_engine.GlbImportTests \
   test_light_engine.ObjExportTests test_light_engine.GlbExportTests \
@@ -109,6 +110,7 @@ if [ "$LIGHT_ENGINE_QT_TESTS" = "1" ]; then
   run "C26 QtFireGhost" test_light_engine.QtFireGhostRegressionTests
   run "C27 QtFColor" test_light_engine.QtFColorTests
   run "C28 QtDial" test_light_engine.QtDialTests
+  run "C29 QtUpdater" test_light_engine.QtUpdaterTests
 fi
 if [ "$fail" = "0" ]; then
   echo "All groups passed."

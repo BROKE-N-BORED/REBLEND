@@ -177,7 +177,7 @@ and the rest run.
 too big under load (a Qt test process grows about 50 MB per test and
 gets killed), so each group runs in its own process and the script
 fails if any group fails. The groups are A2/B2 (headless) and A1/C1/C2/
-C3/D1/D2/C6/C7/C8/C9/C10/C11/C12/C13/C14/C15/C16/C17/C18/C19/C20/C21/C22/C23/C24/C25/C26/C27/C28 (Qt, only with `LIGHT_ENGINE_QT_TESTS=1`); the drag
+C3/D1/D2/C6/C7/C8/C9/C10/C11/C12/C13/C14/C15/C16/C17/C18/C19/C20/C21/C22/C23/C24/C25/C26/C27/C28/C29 (Qt, only with `LIGHT_ENGINE_QT_TESTS=1`); the drag
 tests run as two method lists (D1/D2) for the same reason. CI runs the
 headless suite on every push (`.github/workflows/ci.yml`).
 

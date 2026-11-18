@@ -7,6 +7,7 @@ the soft budget, and nothing is ever blocked for size.
 from __future__ import annotations
 
 import os
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from . import meshio_glb as meshio_glb_mod
 from . import meshio_obj as meshio_obj_mod
 from . import particles as particles_mod
 from . import style as style_mod
+from . import updater as updater_mod
 from . import video as video_mod
 from .inspector_data import FIELD_HELP, _physics_enabled
 from .inspector_data import layout_rows_for, param_knobs_for
@@ -77,6 +79,10 @@ DEFAULT_WINDOW_HEIGHT = 700
 # so the margin matters). The dot is amber while work runs, green
 # for the done moment.
 VIDEO_DONE_MS = 200
+# UPD: the silent update check runs this long after the window
+# opens — late enough never to slow launch, soon enough to
+# catch an update while the user is still settling in.
+UPDATE_CHECK_DELAY_MS = 2000
 # The dot colors live in style.py now (UI8): one look, one place —
 # style_mod.BUSY_DOT_COLOR (amber while work runs) and
 # style_mod.DONE_DOT_COLOR (green done moment).
@@ -961,6 +967,107 @@ class EmitterEditorWindow(QtWidgets.QWidget):
         self._after_edit()
 
 
+def update_check_enabled():
+    """UPD: whether the automatic startup check runs. It is on
+    for every real launch. It is off under the test flag: the
+    suite and the verify scripts construct windows by the
+    dozen, and a live check in each would hit the network and
+    could pop an update dialog into a screenshot. The manual
+    Help-menu check is unaffected — it only runs when asked.
+    Tests drive the startup flow directly with fake checkers."""
+    return os.environ.get("LIGHT_ENGINE_QT_TESTS") != "1"
+
+
+class UpdateChecker(QtCore.QObject):
+    """UPD: the background update check. The network call runs
+    on a daemon thread (never the UI thread, never slowing
+    launch) and the result arrives on the finished signal,
+    which Qt delivers on the main thread. check_fn is a test
+    seam — pass a fake and no network is touched."""
+
+    finished = QtCore.Signal(dict)
+
+    def __init__(self, parent=None, check_fn=None):
+        super().__init__(parent)
+        self._check_fn = check_fn or updater_mod.check_for_update
+        self._thread = None
+
+    def start(self):
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._run,
+                                        daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        try:
+            result = self._check_fn()
+        except Exception as exc:  # a checker that raises is unknown
+            result = {"state": "unknown", "latest": None,
+                      "release": None,
+                      "reason": "the update check failed: %s" % exc}
+        try:
+            self.finished.emit(result)
+        except RuntimeError:
+            pass  # the window went away mid-check; drop it
+
+
+class UpdateDownloader(QtCore.QObject):
+    """UPD: the download + verify + stage worker. Same shape as
+    UpdateChecker: the work runs on a daemon thread, progress
+    arrives on the progress signal as (downloaded, total),
+    total 0 when the size is unknown, and the outcome on the
+    finished signal as {"ok": bool, "staging": str} or
+    {"ok": False, "error": "<plain words>"} (or "cancelled":
+    True). cancel() stops the download at the next chunk.
+    download_fn is a test seam."""
+
+    progress = QtCore.Signal(int, int)
+    finished = QtCore.Signal(dict)
+
+    def __init__(self, parent, release, download_fn=None):
+        super().__init__(parent)
+        self._release = release
+        self._download_fn = (download_fn
+                             or updater_mod.download_and_stage)
+        self._cancelled = False
+        self._thread = None
+
+    def cancel(self):
+        self._cancelled = True
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run,
+                                        daemon=True)
+        self._thread.start()
+
+    def _on_progress(self, downloaded, total):
+        if self._cancelled:
+            raise updater_mod.DownloadCancelled()
+        try:
+            self.progress.emit(downloaded, total or 0)
+        except RuntimeError:
+            raise updater_mod.DownloadCancelled()
+
+    def _run(self):
+        try:
+            staging = self._download_fn(
+                self._release, progress=self._on_progress)
+        except updater_mod.DownloadCancelled:
+            result = {"ok": False, "cancelled": True}
+        except updater_mod.UpdaterError as exc:
+            result = {"ok": False, "error": str(exc)}
+        except Exception as exc:
+            result = {"ok": False,
+                      "error": "The download failed: %s" % exc}
+        else:
+            result = {"ok": True, "staging": str(staging)}
+        try:
+            self.finished.emit(result)
+        except RuntimeError:
+            pass  # the window went away mid-download; drop it
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, scene=None, scene_path=None, settings=None):
         super().__init__()
@@ -1016,6 +1123,19 @@ class MainWindow(QtWidgets.QMainWindow):
         # The pie menu (UI9); None until first opened, then one
         # shared instance, re-opened at the cursor each time.
         self._pie_menu = None
+        # UPD: the update flow's state. The checker and the
+        # downloader live only while their work runs; the
+        # release is the one the check found; the restart flag
+        # is set when the user says Yes to restarting, and the
+        # relaunch helper spawns only when the app is actually
+        # quitting (aboutToQuit), so cancelling the
+        # unsaved-work prompt leaves no stray relaunch.
+        self._update_checker = None
+        self._update_manual = False
+        self._update_release = None
+        self._update_downloader = None
+        self._update_progress = None
+        self._restart_after_quit = False
         self._play_timer = QtCore.QTimer(self)
         self._play_timer.timeout.connect(self._advance_frame)
         self._build_ui()
@@ -1033,6 +1153,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if missing:
             self.statusBar().showMessage(missing[0])
         self._update_play_timer()
+        # UPD: the silent update check — one background check
+        # per launch, a few seconds after the window opens so
+        # it never slows launch. Up to date (or no network)
+        # means nothing happens at all. Off under the test
+        # flag (see update_check_enabled).
+        if update_check_enabled():
+            QtCore.QTimer.singleShot(UPDATE_CHECK_DELAY_MS,
+                                     self._start_update_check)
 
     def closeEvent(self, event):
         # UI5 (U31): a close from the window system (the X button,
@@ -1210,6 +1338,14 @@ class MainWindow(QtWidgets.QMainWindow):
         redo_action.setShortcut(QtGui.QKeySequence.Redo)
         redo_action.triggered.connect(self.redo)
         edit_menu.addAction(redo_action)
+        # UPD: the Help menu starts here with the update check.
+        # UI4 adds the How to Use index to this menu; it keeps
+        # this entry where it is.
+        help_menu = self.menuBar().addMenu("Help")
+        check_action = QtGui.QAction("Check for updates…", self)
+        check_action.triggered.connect(self._on_check_updates_menu)
+        help_menu.addAction(check_action)
+        self._check_updates_action = check_action
 
     def _build_left(self):
         pane = QtWidgets.QWidget()
@@ -2820,6 +2956,163 @@ class MainWindow(QtWidgets.QMainWindow):
         because a programmatic close has no user to answer."""
         if self._confirm_unsaved():
             self.close()
+
+    # -- updates (UPD) ---------------------------------------------------
+
+    def _on_check_updates_menu(self):
+        """Help > Check for updates. A manual check answers
+        either way — up to date, or why it could not check —
+        where the automatic check stays silent unless an
+        update is out."""
+        self._start_update_check(manual=True)
+
+    def _start_update_check(self, manual=False, check_fn=None):
+        """Start one background update check. A check already
+        running is left alone (the menu entry does nothing
+        while it runs). check_fn is a test seam."""
+        if self._update_checker is not None:
+            return
+        self._update_manual = manual
+        checker = UpdateChecker(self, check_fn=check_fn)
+        checker.finished.connect(self._on_update_check_finished)
+        self._update_checker = checker
+        checker.start()
+
+    def _on_update_check_finished(self, result):
+        """The background check answered. An update out means
+        the ask popup; current or unknown means silence for
+        the automatic check, and a plain answer for a manual
+        one."""
+        self._update_checker = None
+        state = result.get("state")
+        if state == "newer":
+            self._update_release = result.get("release")
+            self._ask_update_available(result.get("latest"))
+        elif state == "current":
+            if self._update_manual:
+                QtWidgets.QMessageBox.information(
+                    self, "Reblend is up to date",
+                    "You have the latest version of Reblend (%s)."
+                    % result.get("latest"))
+        elif self._update_manual:
+            QtWidgets.QMessageBox.warning(
+                self, "Could not check for updates",
+                "Reblend could not check for updates: %s"
+                % result.get("reason", "unknown reason"))
+
+    def _ask_update_available(self, latest_tag):
+        """The update popup. Only a Yes starts the download;
+        a No is the end of it — the check runs again next
+        launch."""
+        answer = QtWidgets.QMessageBox.question(
+            self, "Update available",
+            "A new version of Reblend is available (%s).\n\n"
+            "Update now?" % latest_tag,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.Yes)
+        if answer == QtWidgets.QMessageBox.Yes:
+            self._start_update_download()
+
+    def _start_update_download(self, download_fn=None):
+        """Download the release the check found, with a
+        cancellable progress dialog. A release with no
+        checksum sidecar is refused here in plain words —
+        never a blind install. download_fn is a test seam."""
+        release = self._update_release
+        if release is None:
+            return
+        if not release.get("sha_url"):
+            QtWidgets.QMessageBox.warning(
+                self, "Update cannot be installed",
+                "This update has no checksum file, so Reblend "
+                "will not install it. An update without a "
+                "checksum cannot be checked, and Reblend never "
+                "installs a download it cannot check.")
+            return
+        progress = QtWidgets.QProgressDialog(
+            "Downloading the update…", "Cancel", 0, 0, self)
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        self._update_progress = progress
+        worker = UpdateDownloader(self, release,
+                                  download_fn=download_fn)
+        worker.progress.connect(self._on_update_download_progress)
+        worker.finished.connect(self._on_update_download_finished)
+        progress.canceled.connect(worker.cancel)
+        self._update_downloader = worker
+        progress.show()
+        worker.start()
+
+    def _on_update_download_progress(self, downloaded, total):
+        """The download worker's progress: a known size fills
+        the bar, an unknown size keeps it pulsing."""
+        progress = self._update_progress
+        if progress is None:
+            return
+        if total > 0:
+            progress.setMaximum(total)
+            progress.setValue(downloaded)
+        progress.setLabelText("Downloading the update…")
+
+    def _on_update_download_finished(self, result):
+        """The download ended: cancelled, failed, or staged.
+        A staged update asks about the restart — Yes restarts
+        into it, No leaves it for the next launch."""
+        self._update_downloader = None
+        if self._update_progress is not None:
+            self._update_progress.close()
+            self._update_progress = None
+        if result.get("cancelled"):
+            self.statusBar().showMessage(
+                "Update download cancelled.")
+            return
+        if not result.get("ok"):
+            QtWidgets.QMessageBox.warning(
+                self, "Update failed",
+                result.get("error") or "The update failed.")
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self, "Update ready",
+            "The update is downloaded and checked. Restart "
+            "Reblend now to complete the update?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.Yes)
+        if answer == QtWidgets.QMessageBox.Yes:
+            self._restart_for_update()
+        else:
+            self.statusBar().showMessage(
+                "Update ready. It will install when Reblend "
+                "restarts.")
+
+    def _restart_for_update(self):
+        """Restart into the staged update. The relaunch helper
+        spawns only when the app is actually quitting
+        (aboutToQuit), so cancelling the unsaved-work prompt
+        leaves the app running with no stray relaunch — the
+        staged update then applies at the next launch, as a
+        No would have done. With no launcher to return
+        through, the restart is skipped and the update simply
+        waits for the next launch."""
+        if not updater_mod.can_restart():
+            QtWidgets.QMessageBox.information(
+                self, "Update ready",
+                "The update is ready and will install the next "
+                "time Reblend starts.")
+            return
+        self._restart_after_quit = True
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._spawn_restart_helper)
+        self._quit()
+
+    def _spawn_restart_helper(self):
+        """aboutToQuit: the app is going away, so start the
+        helper that waits for it to exit and relaunches
+        run.sh into the staged update."""
+        if self._restart_after_quit:
+            updater_mod.request_restart()
 
     def _new_scene(self):
         if not self._confirm_unsaved():

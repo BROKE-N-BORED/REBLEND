@@ -6,6 +6,7 @@ installed (they need a display; under Xvfb + xcb, QOpenGLWidget
 works — it does not under offscreen).
 """
 import base64
+import hashlib
 import importlib.util
 import json
 import math
@@ -14,6 +15,8 @@ import struct
 import sys
 import tempfile
 import unittest
+import urllib.error
+import zipfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
@@ -31,6 +34,7 @@ from light_engine import scene as scene_mod  # noqa: E402
 from light_engine import shaders  # noqa: E402
 from light_engine import style as style_mod  # noqa: E402
 from light_engine import textures  # noqa: E402
+from light_engine import updater as updater_mod  # noqa: E402
 from light_engine import video as video_mod  # noqa: E402
 
 import glb_fixture  # noqa: E402
@@ -13947,6 +13951,929 @@ class QtDialTests(unittest.TestCase):
             self._dial.setRange(10.0, 5.0)
         with self.assertRaises(ValueError):
             self._dial.setStep(0.0)
+
+
+class _FakeResponse:
+    """A urllib response stand-in: bytes + headers, usable as a
+    context manager, read in chunks like the real thing."""
+
+    def __init__(self, body, headers=None):
+        self._body = body
+        self._pos = 0
+        self.headers = headers or {}
+
+    def read(self, size=-1):
+        if size is None or size < 0:
+            chunk = self._body[self._pos:]
+            self._pos = len(self._body)
+            return chunk
+        chunk = self._body[self._pos:self._pos + size]
+        self._pos += len(chunk)
+        return chunk
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _fake_urlopen(mapping):
+    """A urlopen stand-in: mapping is url -> bytes, or an
+    exception to raise for that URL. Unknown URLs raise
+    URLError, like a DNS failure."""
+    def opener(url, timeout=None):
+        if url not in mapping:
+            raise urllib.error.URLError("unknown url in test: %s"
+                                        % url)
+        value = mapping[url]
+        if isinstance(value, Exception):
+            raise value
+        return _FakeResponse(value)
+    return opener
+
+
+def _release_payload(tag="v0.2-r2", with_sha=True, with_zip=True):
+    """A GitHub releases/latest payload for one tag."""
+    assets = []
+    if with_zip:
+        assets.append({
+            "name": "REBLEND-v0.2-r2-RELEASE.zip",
+            "browser_download_url":
+                "https://example.invalid/REBLEND.zip"})
+    if with_sha:
+        assets.append({
+            "name": "REBLEND-v0.2-r2-RELEASE.zip.sha256",
+            "browser_download_url":
+                "https://example.invalid/REBLEND.zip.sha256"})
+    return {"tag_name": tag,
+            "html_url": "https://example.invalid/releases/tag/%s"
+                        % tag,
+            "assets": assets}
+
+
+class UpdaterTests(unittest.TestCase):
+    """UPD: the updater core — check, download, verify, stage,
+    apply, restart. Headless, no network: every URL goes
+    through _fake_urlopen, every app folder is a temp dir."""
+
+    def _release(self, tag="v0.2-r2", with_sha=True):
+        payload = _release_payload(tag=tag, with_sha=with_sha)
+        urlopen = _fake_urlopen({
+            updater_mod.LATEST_RELEASE_URL:
+                json.dumps(payload).encode("utf-8")})
+        return updater_mod.fetch_latest_release(urlopen=urlopen)
+
+    def _app_dir(self, tmp):
+        """A fake installed app: run.sh, a main.py, a venv
+        marker, and one file the update will replace."""
+        app = Path(tmp) / "reblend"
+        (app / "light_engine").mkdir(parents=True)
+        (app / ".venv" / "bin").mkdir(parents=True)
+        (app / "run.sh").write_text("#!/bin/sh\necho old\n")
+        (app / "main.py").write_text("OLD\n")
+        (app / "light_engine" / "__init__.py").write_text(
+            "__version__ = \"0.2-old\"\n")
+        (app / ".venv" / "bin" / "python").write_text("venv\n")
+        return app
+
+    def _update_zip(self, tmp, extra=None, replace_main="NEW\n"):
+        """A release zip over the fake app: main.py replaced,
+        a new file added, plus any extra members (name ->
+        bytes) the test wants."""
+        zip_path = Path(tmp) / "update.zip"
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            archive.writestr("main.py", replace_main)
+            archive.writestr("light_engine/__init__.py",
+                             "__version__ = \"0.2-r2\"\n")
+            archive.writestr("newfile.txt", "new\n")
+            for name, data in (extra or {}).items():
+                archive.writestr(name, data)
+        return zip_path
+
+    def _stage(self, tmp, app=None, tag="v0.2-r2"):
+        """Stage a good update into a temp app dir and return
+        (app, staging)."""
+        app = app or self._app_dir(tmp)
+        zip_path = self._update_zip(tmp)
+        digest = updater_mod.sha256_file(zip_path)
+        release = {"tag": tag,
+                   "zip_url": "https://example.invalid/u.zip",
+                   "zip_name": "REBLEND.zip",
+                   "sha_url": "https://example.invalid/u.sha256",
+                   "sha_name": "REBLEND.zip.sha256",
+                   "page_url": "https://example.invalid/releases"}
+        urlopen = _fake_urlopen({
+            release["zip_url"]: zip_path.read_bytes(),
+            release["sha_url"]: ("%s  REBLEND.zip\n"
+                                 % digest).encode("utf-8")})
+        staging = updater_mod.download_and_stage(
+            release, app_dir_path=app, urlopen=urlopen)
+        return app, staging
+
+    def test_current_tag_matches_version(self):
+        from light_engine import __version__
+        self.assertEqual(updater_mod.current_tag(),
+                         "v" + __version__)
+        # Pinned: this tree ships as v0.2-upd, so the updater
+        # must say so — a stale version would offer the app
+        # its own release forever.
+        self.assertEqual(updater_mod.current_tag(), "v0.2-upd")
+
+    def test_check_same_tag_is_current(self):
+        payload = _release_payload(tag="v0.2-upd")
+        urlopen = _fake_urlopen({
+            updater_mod.LATEST_RELEASE_URL:
+                json.dumps(payload).encode("utf-8")})
+        result = updater_mod.check_for_update(urlopen=urlopen)
+        self.assertEqual(result["state"], "current")
+        self.assertEqual(result["latest"], "v0.2-upd")
+
+    def test_check_different_tag_is_newer(self):
+        result = updater_mod.check_for_update(
+            urlopen=_fake_urlopen({
+                updater_mod.LATEST_RELEASE_URL: json.dumps(
+                    _release_payload(tag="v0.2-r2")).encode()}))
+        self.assertEqual(result["state"], "newer")
+        self.assertEqual(result["latest"], "v0.2-r2")
+        self.assertEqual(result["release"]["zip_url"],
+                         "https://example.invalid/REBLEND.zip")
+        self.assertIsNotNone(result["release"]["sha_url"])
+
+    def test_check_network_error_is_unknown(self):
+        urlopen = _fake_urlopen({
+            updater_mod.LATEST_RELEASE_URL:
+                urllib.error.URLError("no route to host")})
+        result = updater_mod.check_for_update(urlopen=urlopen)
+        self.assertEqual(result["state"], "unknown")
+        self.assertIn("GitHub", result["reason"])
+
+    def test_check_http_error_is_unknown(self):
+        error = urllib.error.HTTPError(
+            updater_mod.LATEST_RELEASE_URL, 403, "Forbidden",
+            None, None)
+        urlopen = _fake_urlopen({updater_mod.LATEST_RELEASE_URL:
+                                 error})
+        result = updater_mod.check_for_update(urlopen=urlopen)
+        self.assertEqual(result["state"], "unknown")
+        self.assertIn("403", result["reason"])
+
+    def test_check_timeout_is_unknown(self):
+        urlopen = _fake_urlopen({
+            updater_mod.LATEST_RELEASE_URL: urllib.error.URLError(
+                TimeoutError("timed out"))})
+        result = updater_mod.check_for_update(urlopen=urlopen)
+        self.assertEqual(result["state"], "unknown")
+        self.assertIn("timed out", result["reason"])
+
+    def test_check_malformed_json_is_unknown(self):
+        urlopen = _fake_urlopen({
+            updater_mod.LATEST_RELEASE_URL: b"not json{"})
+        result = updater_mod.check_for_update(urlopen=urlopen)
+        self.assertEqual(result["state"], "unknown")
+
+    def test_check_non_dict_json_is_unknown(self):
+        urlopen = _fake_urlopen({
+            updater_mod.LATEST_RELEASE_URL: b"[1, 2]"})
+        result = updater_mod.check_for_update(urlopen=urlopen)
+        self.assertEqual(result["state"], "unknown")
+
+    def test_check_missing_tag_is_unknown(self):
+        urlopen = _fake_urlopen({
+            updater_mod.LATEST_RELEASE_URL: b"{}"})
+        result = updater_mod.check_for_update(urlopen=urlopen)
+        self.assertEqual(result["state"], "unknown")
+
+    def test_check_no_zip_asset_is_unknown(self):
+        payload = _release_payload(with_zip=False)
+        urlopen = _fake_urlopen({
+            updater_mod.LATEST_RELEASE_URL:
+                json.dumps(payload).encode("utf-8")})
+        result = updater_mod.check_for_update(urlopen=urlopen)
+        self.assertEqual(result["state"], "unknown")
+        self.assertIn("program file", result["reason"])
+
+    def test_check_missing_sidecar_still_newer(self):
+        # The check reports the update; the INSTALL refuses it.
+        release = self._release(with_sha=False)
+        self.assertIsNone(release["sha_url"])
+        urlopen = _fake_urlopen({
+            updater_mod.LATEST_RELEASE_URL: json.dumps(
+                _release_payload(with_sha=False)).encode()})
+        result = updater_mod.check_for_update(urlopen=urlopen)
+        self.assertEqual(result["state"], "newer")
+
+    def test_asset_pick_prefers_release_zip(self):
+        payload = {"tag_name": "v0.2-r2", "assets": [
+            {"name": "something-else.zip",
+             "browser_download_url": "https://example.invalid/a"},
+            {"name": "REBLEND-v0.2-r2-RELEASE.zip",
+             "browser_download_url": "https://example.invalid/b"}]}
+        zip_asset, _sha = updater_mod._pick_assets(payload)
+        self.assertEqual(zip_asset[1], "https://example.invalid/b")
+
+    def test_parse_sha256_file(self):
+        digest = "a" * 64
+        self.assertEqual(updater_mod.parse_sha256_file(digest),
+                         digest)
+        self.assertEqual(
+            updater_mod.parse_sha256_file(
+                "%s  REBLEND.zip\n" % digest.upper()),
+            digest)
+        self.assertIsNone(updater_mod.parse_sha256_file("garbage"))
+        self.assertIsNone(updater_mod.parse_sha256_file("a" * 63))
+        self.assertIsNone(updater_mod.parse_sha256_file(""))
+        self.assertIsNone(updater_mod.parse_sha256_file(None))
+
+    def test_sha256_and_verify(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "f.bin"
+            path.write_bytes(b"hello")
+            expected = hashlib.sha256(b"hello").hexdigest()
+            self.assertEqual(updater_mod.sha256_file(path),
+                             expected)
+            self.assertTrue(updater_mod.verify_zip(path, expected))
+            self.assertTrue(updater_mod.verify_zip(
+                path, expected.upper()))
+            self.assertFalse(updater_mod.verify_zip(
+                path, "0" * 64))
+            self.assertFalse(updater_mod.verify_zip(
+                Path(tmp) / "missing", expected))
+
+    def test_download_streams_and_reports_progress(self):
+        body = b"x" * 100000
+        seen = []
+
+        def progress(downloaded, total):
+            seen.append((downloaded, total))
+
+        urlopen = _fake_urlopen({"https://example.invalid/f": body})
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "f.bin"
+            written = updater_mod.download(
+                "https://example.invalid/f", dest,
+                urlopen=urlopen, progress=progress)
+            self.assertEqual(written, len(body))
+            self.assertEqual(dest.read_bytes(), body)
+            self.assertTrue(seen)
+            self.assertEqual(seen[-1][0], len(body))
+
+    def test_download_network_error(self):
+        urlopen = _fake_urlopen({
+            "https://example.invalid/f":
+                urllib.error.URLError("no route")})
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(updater_mod.UpdaterError):
+                updater_mod.download(
+                    "https://example.invalid/f",
+                    Path(tmp) / "f.bin", urlopen=urlopen)
+
+    def test_download_cancel_via_progress(self):
+        def progress(downloaded, total):
+            raise updater_mod.DownloadCancelled()
+
+        urlopen = _fake_urlopen(
+            {"https://example.invalid/f": b"x" * 1000})
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(
+                    updater_mod.DownloadCancelled):
+                updater_mod.download(
+                    "https://example.invalid/f",
+                    Path(tmp) / "f.bin", urlopen=urlopen,
+                    progress=progress)
+
+    def test_stage_good_checksum(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app, staging = self._stage(tmp)
+            pending = updater_mod.pending_update(app)
+            self.assertEqual(pending["tag"], "v0.2-r2")
+            self.assertTrue((staging / "update.zip").exists())
+            # No temp files left behind.
+            self.assertFalse(
+                list(staging.glob("*.download")))
+
+    def test_stage_bad_checksum_refuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self._app_dir(tmp)
+            zip_path = self._update_zip(tmp)
+            release = {"tag": "v0.2-r2",
+                       "zip_url": "https://example.invalid/u.zip",
+                       "zip_name": "REBLEND.zip",
+                       "sha_url":
+                           "https://example.invalid/u.sha256",
+                       "sha_name": "REBLEND.zip.sha256",
+                       "page_url": "https://example.invalid/r"}
+            urlopen = _fake_urlopen({
+                release["zip_url"]: zip_path.read_bytes(),
+                release["sha_url"]: ("0" * 64).encode("utf-8")})
+            with self.assertRaises(updater_mod.UpdaterError) as ctx:
+                updater_mod.download_and_stage(
+                    release, app_dir_path=app, urlopen=urlopen)
+            self.assertIn("checksum", str(ctx.exception))
+            self.assertIsNone(updater_mod.pending_update(app))
+            self.assertFalse(
+                (updater_mod.staging_dir(app)
+                 / "update.zip").exists())
+
+    def test_stage_missing_sidecar_refuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self._app_dir(tmp)
+            release = {"tag": "v0.2-r2",
+                       "zip_url": "https://example.invalid/u.zip",
+                       "zip_name": "REBLEND.zip",
+                       "sha_url": None, "sha_name": None,
+                       "page_url": "https://example.invalid/r"}
+            with self.assertRaises(updater_mod.UpdaterError) as ctx:
+                updater_mod.download_and_stage(
+                    release, app_dir_path=app,
+                    urlopen=_fake_urlopen({}))
+            self.assertIn("checksum", str(ctx.exception))
+            self.assertIsNone(updater_mod.pending_update(app))
+
+    def test_stage_unparsable_sidecar_refuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self._app_dir(tmp)
+            zip_path = self._update_zip(tmp)
+            release = {"tag": "v0.2-r2",
+                       "zip_url": "https://example.invalid/u.zip",
+                       "zip_name": "REBLEND.zip",
+                       "sha_url":
+                           "https://example.invalid/u.sha256",
+                       "sha_name": "REBLEND.zip.sha256",
+                       "page_url": "https://example.invalid/r"}
+            urlopen = _fake_urlopen({
+                release["zip_url"]: zip_path.read_bytes(),
+                release["sha_url"]: b"not a checksum\n"})
+            with self.assertRaises(updater_mod.UpdaterError):
+                updater_mod.download_and_stage(
+                    release, app_dir_path=app, urlopen=urlopen)
+            self.assertIsNone(updater_mod.pending_update(app))
+
+    def test_stage_download_failure_leaves_no_pending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self._app_dir(tmp)
+            release = {"tag": "v0.2-r2",
+                       "zip_url": "https://example.invalid/u.zip",
+                       "zip_name": "REBLEND.zip",
+                       "sha_url":
+                           "https://example.invalid/u.sha256",
+                       "sha_name": "REBLEND.zip.sha256",
+                       "page_url": "https://example.invalid/r"}
+            urlopen = _fake_urlopen({
+                release["zip_url"]:
+                    urllib.error.URLError("no route")})
+            with self.assertRaises(updater_mod.UpdaterError):
+                updater_mod.download_and_stage(
+                    release, app_dir_path=app, urlopen=urlopen)
+            self.assertIsNone(updater_mod.pending_update(app))
+
+    def test_apply_applies_staged_update(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app, staging = self._stage(tmp)
+            result = updater_mod.apply_pending_update(app)
+            self.assertTrue(result["applied"])
+            self.assertEqual(result["tag"], "v0.2-r2")
+            self.assertEqual((app / "main.py").read_text(), "NEW\n")
+            self.assertEqual((app / "newfile.txt").read_text(),
+                             "new\n")
+            self.assertFalse(staging.exists())
+            self.assertIn("v0.2-r2",
+                          (app / "update.log").read_text())
+            # A second apply finds nothing pending.
+            result = updater_mod.apply_pending_update(app)
+            self.assertFalse(result["applied"])
+            self.assertIsNone(result["error"])
+
+    def test_apply_nothing_pending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self._app_dir(tmp)
+            result = updater_mod.apply_pending_update(app)
+            self.assertFalse(result["applied"])
+            self.assertIsNone(result["error"])
+
+    def test_apply_bad_checksum_refuses_and_moves_aside(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app, staging = self._stage(tmp)
+            # Tamper with the staged zip after staging.
+            zip_path = staging / "update.zip"
+            zip_path.write_bytes(zip_path.read_bytes() + b"junk")
+            result = updater_mod.apply_pending_update(app)
+            self.assertFalse(result["applied"])
+            self.assertIn("checksum", result["error"])
+            self.assertEqual((app / "main.py").read_text(), "OLD\n")
+            self.assertFalse(staging.exists())
+            failed = app.parent / "reblend-update.failed"
+            self.assertTrue(failed.exists())
+            # The next launch does not retry it.
+            result = updater_mod.apply_pending_update(app)
+            self.assertFalse(result["applied"])
+            self.assertIsNone(result["error"])
+
+    def test_apply_rejects_zip_slip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self._app_dir(tmp)
+            zip_path = self._update_zip(
+                tmp, extra={"../evil.txt": b"evil\n"})
+            digest = updater_mod.sha256_file(zip_path)
+            staging = updater_mod.staging_dir(app)
+            staging.mkdir(parents=True)
+            (staging / "update.zip").write_bytes(
+                zip_path.read_bytes())
+            (staging / "pending.json").write_text(json.dumps(
+                {"tag": "v0.2-r2", "sha256": digest,
+                 "zip_name": "update.zip"}))
+            result = updater_mod.apply_pending_update(app)
+            self.assertFalse(result["applied"])
+            self.assertFalse(
+                (Path(tmp) / "evil.txt").exists())
+            self.assertEqual((app / "main.py").read_text(), "OLD\n")
+
+    def test_apply_skips_venv_members(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self._app_dir(tmp)
+            zip_path = self._update_zip(
+                tmp, extra={".venv/bin/python": b"pwned\n"})
+            digest = updater_mod.sha256_file(zip_path)
+            staging = updater_mod.staging_dir(app)
+            staging.mkdir(parents=True)
+            (staging / "update.zip").write_bytes(
+                zip_path.read_bytes())
+            (staging / "pending.json").write_text(json.dumps(
+                {"tag": "v0.2-r2", "sha256": digest,
+                 "zip_name": "update.zip"}))
+            result = updater_mod.apply_pending_update(app)
+            self.assertTrue(result["applied"])
+            self.assertEqual(
+                (app / ".venv" / "bin" / "python").read_text(),
+                "venv\n")
+
+    def test_apply_restores_script_modes(self):
+        # A zip that stored run.sh without its exec bit must
+        # not brick the app: the apply re-asserts it.
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self._app_dir(tmp)
+            zip_path = Path(tmp) / "u.zip"
+            with zipfile.ZipFile(zip_path, "w") as archive:
+                info = zipfile.ZipInfo("run.sh")
+                info.external_attr = 0o100644 << 16
+                archive.writestr(info, "#!/bin/sh\necho new\n")
+                archive.writestr("main.py", "NEW\n")
+            digest = updater_mod.sha256_file(zip_path)
+            staging = updater_mod.staging_dir(app)
+            staging.mkdir(parents=True)
+            (staging / "update.zip").write_bytes(
+                zip_path.read_bytes())
+            (staging / "pending.json").write_text(json.dumps(
+                {"tag": "v0.2-r2", "sha256": digest,
+                 "zip_name": "update.zip"}))
+            result = updater_mod.apply_pending_update(app)
+            self.assertTrue(result["applied"])
+            mode = (app / "run.sh").stat().st_mode
+            self.assertTrue(mode & 0o111,
+                            "run.sh lost its exec bit: %o" % mode)
+
+    def test_apply_refuses_git_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _staging = self._stage(tmp)
+            (app / ".git").mkdir()
+            result = updater_mod.apply_pending_update(app)
+            self.assertFalse(result["applied"])
+            self.assertIn("checkout", result["error"])
+            self.assertEqual((app / "main.py").read_text(), "OLD\n")
+
+    def test_pending_update_none_when_absent_or_broken(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self._app_dir(tmp)
+            self.assertIsNone(updater_mod.pending_update(app))
+            staging = updater_mod.staging_dir(app)
+            staging.mkdir(parents=True)
+            (staging / "pending.json").write_text("not json{")
+            self.assertIsNone(updater_mod.pending_update(app))
+            (staging / "pending.json").write_text(
+                json.dumps({"tag": "v0.2-r2"}))
+            self.assertIsNone(updater_mod.pending_update(app))
+
+    def test_staging_dir_is_sibling(self):
+        self.assertEqual(
+            updater_mod.staging_dir("/x/reblend"),
+            Path("/x/reblend-update"))
+        self.assertEqual(
+            updater_mod.staging_dir(Path("/home/u/.local/share/reblend")),
+            Path("/home/u/.local/share/reblend-update"))
+
+    def test_request_restart_spawns_helper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self._app_dir(tmp)
+            spawned = []
+            ok = updater_mod.request_restart(
+                app_dir_path=app, pid=4242,
+                spawn=spawned.append)
+            self.assertTrue(ok)
+            self.assertEqual(len(spawned), 1)
+            argv = spawned[0]
+            self.assertEqual(argv[0], "/bin/sh")
+            # The helper waits for the old pid, then execs run.sh.
+            self.assertIn("kill -0", argv[2])
+            self.assertIn("4242", argv)
+            self.assertIn(str(app / "run.sh"), argv)
+            self.assertIn("exec", argv[2])
+
+    def test_request_restart_no_launcher(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = Path(tmp) / "reblend"
+            app.mkdir()
+            spawned = []
+            ok = updater_mod.request_restart(
+                app_dir_path=app, pid=4242,
+                spawn=spawned.append)
+            self.assertFalse(ok)
+            self.assertEqual(spawned, [])
+
+    def test_can_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self._app_dir(tmp)
+            self.assertTrue(updater_mod.can_restart(app))
+            (app / "run.sh").unlink()
+            self.assertFalse(updater_mod.can_restart(app))
+
+
+@unittest.skipUnless(QT_TESTS, "Qt tests need LIGHT_ENGINE_QT_TESTS=1")
+class QtUpdaterTests(unittest.TestCase):
+    """UPD: the update flow in the window — the Help-menu
+    entry, the silent automatic check, the ask popup, the
+    download + restart prompts, and the worker threads. No
+    real network: every check and download is a fake injected
+    through the test seams, and every dialog is a recorded
+    stand-in for QMessageBox."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6 import QtWidgets
+        cls._app = QtWidgets.QApplication.instance()
+        if cls._app is None:
+            cls._app = QtWidgets.QApplication([])
+        from light_engine import window as window_mod
+        cls.MainWindow = window_mod.MainWindow
+        cls.window_mod = window_mod
+
+    def setUp(self):
+        from PySide6 import QtWidgets
+        self._window = self.MainWindow(
+            scene=scene_mod.new_scene())
+        self._window.resize(1280, 800)
+        self._window.show()
+        self._pump()
+        # Recorded stand-ins for the three dialog kinds.
+        self._questions = []
+        self._infos = []
+        self._warnings = []
+        self._question_answer = QtWidgets.QMessageBox.No
+        orig_question = QtWidgets.QMessageBox.question
+        orig_info = QtWidgets.QMessageBox.information
+        orig_warning = QtWidgets.QMessageBox.warning
+        self.addCleanup(setattr, QtWidgets.QMessageBox,
+                        "question", orig_question)
+        self.addCleanup(setattr, QtWidgets.QMessageBox,
+                        "information", orig_info)
+        self.addCleanup(setattr, QtWidgets.QMessageBox,
+                        "warning", orig_warning)
+
+        def fake_question(parent, title, text, *args, **kwargs):
+            self._questions.append((title, text))
+            return self._question_answer
+
+        def fake_info(parent, title, text, *args, **kwargs):
+            self._infos.append((title, text))
+            return QtWidgets.QMessageBox.Ok
+
+        def fake_warning(parent, title, text, *args, **kwargs):
+            self._warnings.append((title, text))
+            return QtWidgets.QMessageBox.Ok
+
+        QtWidgets.QMessageBox.question = fake_question
+        QtWidgets.QMessageBox.information = fake_info
+        QtWidgets.QMessageBox.warning = fake_warning
+
+    def tearDown(self):
+        self._window.close()
+        self._pump()
+
+    def _pump(self, rounds=10):
+        from PySide6 import QtCore, QtWidgets
+        for _ in range(rounds):
+            QtWidgets.QApplication.processEvents()
+            QtCore.QThread.msleep(50)
+
+    def _release(self, tag="v0.2-r2", with_sha=True):
+        return {"tag": tag,
+                "zip_url": "https://example.invalid/u.zip",
+                "zip_name": "REBLEND.zip",
+                "sha_url": ("https://example.invalid/u.sha256"
+                            if with_sha else None),
+                "sha_name": ("REBLEND.zip.sha256"
+                             if with_sha else None),
+                "page_url": "https://example.invalid/r"}
+
+    def _wait_for_check(self, timeout_ms=5000):
+        """Pump until the window's background check finishes."""
+        from PySide6 import QtCore
+        waited = 0
+        while self._window._update_checker is not None:
+            self._pump(rounds=2)
+            waited += 100
+            if waited >= timeout_ms:
+                break
+        self.assertIsNone(self._window._update_checker)
+
+    def test_help_menu_has_check_for_updates(self):
+        from PySide6 import QtWidgets
+        menus = [action.text() for action in
+                 self._window.menuBar().actions()]
+        self.assertIn("Help", menus)
+        action = self._window._check_updates_action
+        self.assertEqual(action.text(), "Check for updates…")
+        help_menus = [menu for menu in
+                      self._window.menuBar().findChildren(
+                          QtWidgets.QMenu)
+                      if menu.title() == "Help"]
+        self.assertEqual(len(help_menus), 1)
+        self.assertIn(action, help_menus[0].actions())
+
+    def test_startup_check_disabled_under_test_flag(self):
+        # The test flag is set in this process, so no window
+        # starts a live check on its own.
+        self.assertFalse(self.window_mod.update_check_enabled())
+        self.assertIsNone(self._window._update_checker)
+        saved = os.environ.pop("LIGHT_ENGINE_QT_TESTS", None)
+        try:
+            self.assertTrue(
+                self.window_mod.update_check_enabled())
+        finally:
+            if saved is not None:
+                os.environ["LIGHT_ENGINE_QT_TESTS"] = saved
+
+    def test_manual_check_current_shows_up_to_date(self):
+        def check():
+            return {"state": "current", "latest": "v0.2-upd",
+                    "release": self._release(tag="v0.2-upd")}
+
+        self._window._start_update_check(manual=True,
+                                         check_fn=check)
+        self._wait_for_check()
+        self.assertEqual(len(self._infos), 1)
+        self.assertIn("up to date", self._infos[0][0])
+        self.assertIn("v0.2-upd", self._infos[0][1])
+        self.assertEqual(self._questions, [])
+        self.assertEqual(self._warnings, [])
+
+    def test_manual_check_unknown_shows_reason(self):
+        def check():
+            return {"state": "unknown", "latest": None,
+                    "release": None,
+                    "reason": "could not reach GitHub: boom"}
+
+        self._window._start_update_check(manual=True,
+                                         check_fn=check)
+        self._wait_for_check()
+        self.assertEqual(len(self._warnings), 1)
+        self.assertIn("boom", self._warnings[0][1])
+        self.assertEqual(self._questions, [])
+        self.assertEqual(self._infos, [])
+
+    def test_automatic_check_current_is_silent(self):
+        def check():
+            return {"state": "current", "latest": "v0.2-upd",
+                    "release": self._release(tag="v0.2-upd")}
+
+        self._window._start_update_check(manual=False,
+                                         check_fn=check)
+        self._wait_for_check()
+        self.assertEqual(self._questions, [])
+        self.assertEqual(self._infos, [])
+        self.assertEqual(self._warnings, [])
+
+    def test_automatic_check_unknown_is_silent(self):
+        def check():
+            return {"state": "unknown", "latest": None,
+                    "release": None, "reason": "no network"}
+
+        self._window._start_update_check(manual=False,
+                                         check_fn=check)
+        self._wait_for_check()
+        self.assertEqual(self._questions, [])
+        self.assertEqual(self._infos, [])
+        self.assertEqual(self._warnings, [])
+
+    def test_update_popup_no_does_not_download(self):
+        from PySide6 import QtWidgets
+        self._question_answer = QtWidgets.QMessageBox.No
+        started = []
+        self._window._start_update_download = lambda *a, **k: (
+            started.append(True))
+
+        def check():
+            return {"state": "newer", "latest": "v0.2-r2",
+                    "release": self._release()}
+
+        self._window._start_update_check(manual=False,
+                                         check_fn=check)
+        self._wait_for_check()
+        self.assertEqual(len(self._questions), 1)
+        self.assertIn("v0.2-r2", self._questions[0][1])
+        self.assertEqual(started, [])
+
+    def test_update_popup_yes_starts_download(self):
+        from PySide6 import QtWidgets
+        self._question_answer = QtWidgets.QMessageBox.Yes
+        started = []
+        self._window._start_update_download = lambda *a, **k: (
+            started.append(True))
+
+        def check():
+            return {"state": "newer", "latest": "v0.2-r2",
+                    "release": self._release()}
+
+        self._window._start_update_check(manual=False,
+                                         check_fn=check)
+        self._wait_for_check()
+        self.assertEqual(started, [True])
+
+    def test_download_success_asks_restart_no_defers(self):
+        from PySide6 import QtWidgets
+        self._question_answer = QtWidgets.QMessageBox.No
+        self._window._on_update_download_finished({"ok": True})
+        self.assertEqual(len(self._questions), 1)
+        self.assertIn("Restart", self._questions[0][1])
+        self.assertIn("restarts",
+                      self._window.statusBar().currentMessage())
+
+    def test_download_failure_shows_warning(self):
+        self._window._on_update_download_finished(
+            {"ok": False, "error": "the download failed: boom"})
+        self.assertEqual(len(self._warnings), 1)
+        self.assertIn("boom", self._warnings[0][1])
+        self.assertEqual(self._questions, [])
+
+    def test_download_cancelled_is_quiet(self):
+        self._window._on_update_download_finished(
+            {"ok": False, "cancelled": True})
+        self.assertEqual(self._questions, [])
+        self.assertEqual(self._warnings, [])
+        self.assertIn("cancelled",
+                      self._window.statusBar().currentMessage())
+
+    def test_no_sidecar_refuses_before_download(self):
+        self._window._update_release = self._release(
+            with_sha=False)
+        self._window._start_update_download()
+        self.assertEqual(len(self._warnings), 1)
+        self.assertIn("checksum", self._warnings[0][1])
+        self.assertIsNone(self._window._update_progress)
+        self.assertIsNone(self._window._update_downloader)
+
+    def test_restart_yes_quits_and_arms_helper(self):
+        from PySide6 import QtWidgets
+        quit_calls = []
+        restart_calls = []
+        self._window._quit = lambda: quit_calls.append(True)
+        orig_can = updater_mod.can_restart
+        orig_request = updater_mod.request_restart
+        self.addCleanup(setattr, updater_mod, "can_restart",
+                        orig_can)
+        self.addCleanup(setattr, updater_mod, "request_restart",
+                        orig_request)
+        updater_mod.can_restart = lambda *a, **k: True
+        updater_mod.request_restart = lambda *a, **k: (
+            restart_calls.append(True))
+        self._window._restart_for_update()
+        self.assertTrue(self._window._restart_after_quit)
+        self.assertEqual(quit_calls, [True])
+        # The helper spawns only when the app actually quits.
+        self._window._spawn_restart_helper()
+        self.assertEqual(restart_calls, [True])
+        # Disarm: the aboutToQuit connection outlives this
+        # test (the QApplication is shared), and a live flag
+        # would spawn the REAL helper when the test process
+        # exits.
+        self._window._restart_after_quit = False
+        QtWidgets.QApplication.instance().aboutToQuit.disconnect(
+            self._window._spawn_restart_helper)
+
+    def test_restart_yes_without_launcher_defers(self):
+        quit_calls = []
+        self._window._quit = lambda: quit_calls.append(True)
+        orig_can = updater_mod.can_restart
+        self.addCleanup(setattr, updater_mod, "can_restart",
+                        orig_can)
+        updater_mod.can_restart = lambda *a, **k: False
+        self._window._restart_for_update()
+        self.assertFalse(self._window._restart_after_quit)
+        self.assertEqual(quit_calls, [])
+        self.assertEqual(len(self._infos), 1)
+        self.assertIn("next time", self._infos[0][1])
+
+    def test_restart_no_keeps_staged_update(self):
+        # A staged update survives the user saying No to the
+        # restart prompt: it is still pending afterwards, and
+        # the next launch applies it.
+        from PySide6 import QtWidgets
+        self._question_answer = QtWidgets.QMessageBox.No
+        with tempfile.TemporaryDirectory() as tmp:
+            app = Path(tmp) / "reblend"
+            (app / "light_engine").mkdir(parents=True)
+            (app / "run.sh").write_text("#!/bin/sh\n")
+            (app / "main.py").write_text("OLD\n")
+            zip_path = Path(tmp) / "u.zip"
+            with zipfile.ZipFile(zip_path, "w") as archive:
+                archive.writestr("main.py", "NEW\n")
+            digest = updater_mod.sha256_file(zip_path)
+            release = self._release()
+            urlopen = _fake_urlopen({
+                release["zip_url"]: zip_path.read_bytes(),
+                release["sha_url"]: ("%s  u.zip\n"
+                                     % digest).encode()})
+            updater_mod.download_and_stage(
+                release, app_dir_path=app, urlopen=urlopen)
+            self._window._on_update_download_finished(
+                {"ok": True})
+            pending = updater_mod.pending_update(app)
+            self.assertIsNotNone(pending)
+            self.assertEqual(pending["tag"], "v0.2-r2")
+            # And the next launch applies it.
+            result = updater_mod.apply_pending_update(app)
+            self.assertTrue(result["applied"])
+            self.assertEqual((app / "main.py").read_text(),
+                             "NEW\n")
+
+    def test_update_checker_delivers_result(self):
+        from PySide6 import QtCore
+        received = []
+
+        def check():
+            return {"state": "current", "latest": "v0.2-upd",
+                    "release": None}
+
+        checker = self.window_mod.UpdateChecker(
+            self._window, check_fn=check)
+        loop = QtCore.QEventLoop()
+        checker.finished.connect(
+            lambda result: (received.append(result),
+                            loop.quit()))
+        QtCore.QTimer.singleShot(5000, loop.quit)
+        checker.start()
+        loop.exec()
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0]["state"], "current")
+
+    def test_update_downloader_reports_progress_and_finish(self):
+        from PySide6 import QtCore
+        seen_progress = []
+        received = []
+
+        def download_fn(release, progress=None):
+            if progress is not None:
+                progress(5, 10)
+                progress(10, 10)
+            return "/tmp/fake-staging"
+
+        worker = self.window_mod.UpdateDownloader(
+            self._window, self._release(),
+            download_fn=download_fn)
+        loop = QtCore.QEventLoop()
+        worker.progress.connect(
+            lambda d, t: seen_progress.append((d, t)))
+        worker.finished.connect(
+            lambda result: (received.append(result),
+                            loop.quit()))
+        QtCore.QTimer.singleShot(5000, loop.quit)
+        worker.start()
+        loop.exec()
+        self.assertEqual(seen_progress, [(5, 10), (10, 10)])
+        self.assertEqual(len(received), 1)
+        self.assertTrue(received[0]["ok"])
+
+    def test_downloader_cancel_stops_download(self):
+        from PySide6 import QtCore
+        received = []
+
+        def download_fn(release, progress=None):
+            # The progress callback raises once cancelled.
+            progress(1, 10)
+            return "/tmp/fake-staging"
+
+        worker = self.window_mod.UpdateDownloader(
+            self._window, self._release(),
+            download_fn=download_fn)
+        worker.cancel()
+        loop = QtCore.QEventLoop()
+        worker.finished.connect(
+            lambda result: (received.append(result),
+                            loop.quit()))
+        QtCore.QTimer.singleShot(5000, loop.quit)
+        worker.start()
+        loop.exec()
+        self.assertEqual(len(received), 1)
+        self.assertTrue(received[0].get("cancelled"))
 
 
 if __name__ == "__main__":
