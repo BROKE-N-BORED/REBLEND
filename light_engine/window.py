@@ -11,7 +11,6 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-import shiboken6
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from . import animation as anim_mod
@@ -37,7 +36,8 @@ from .textures import (FAMILIES, LAYOUT_DISPLAY, STYLES,
                        layouts_for_style, merged_layout_size,
                        merged_params, merged_wear, resolve_layout,
                        spacing_to_count, style_look, style_params)
-from .viewport import PieMenu, PieSlice, Viewport
+from .viewport import Viewport
+from .wheel import Wheel, WheelSlice
 
 SOFT_TRI_BUDGET = 100000
 
@@ -66,6 +66,20 @@ EMITTER_MORPH_MS = 150
 # value (render_frame_to renders the current scene, not the
 # debounced viewport).
 PARAM_REBAKE_MS = 150
+
+# The wheel's Colour page (R2): plain base-color chips, one click
+# each — the quick colors, with the picker beside them for anything
+# else. Plain words, no brand names.
+WHEEL_COLOR_CHIPS = (
+    ("White", "#ffffff"),
+    ("Light grey", "#b0b0b0"),
+    ("Dark grey", "#4a4a4a"),
+    ("Black", "#1a1a1a"),
+    ("Red", "#a03030"),
+    ("Brown", "#8a5a2b"),
+    ("Green", "#4a7a2a"),
+    ("Blue", "#2a5a8a"),
+)
 
 # UI3 (U5): the default window size — 1280x700 fits 1366x768 with
 # room for window decorations and the taskbar.
@@ -263,26 +277,6 @@ class CollapsibleSection(QtWidgets.QWidget):
             self.body.setMaximumHeight(NO_MAX_HEIGHT)
         else:
             self.body.setVisible(False)
-
-
-class _PopupHideFilter(QtCore.QObject):
-    """Calls back when a combo's popup closes (UI12). The popup
-    view gets a Hide event on every close — a pick, Esc, or a
-    click outside — so a hover-preview ends exactly when the
-    browsing ends. Probed, not assumed: both the view and its
-    top-level container get the Hide; watching the view alone
-    is enough. Never consumes the event. Parented to the window
-    so Qt destroys it with the window (a dangling filter must
-    never call back into a half-destroyed window)."""
-
-    def __init__(self, parent, on_hide):
-        super().__init__(parent)
-        self._on_hide = on_hide
-
-    def eventFilter(self, watched, event):
-        if event.type() == QtCore.QEvent.Hide:
-            self._on_hide()
-        return False
 
 
 def _help_label(text):
@@ -1120,9 +1114,26 @@ class MainWindow(QtWidgets.QMainWindow):
         # The emitter editor window (UI2); None until first opened,
         # then one shared instance, re-targeted per emitter.
         self._emitter_editor = None
-        # The pie menu (UI9); None until first opened, then one
-        # shared instance, re-opened at the cursor each time.
-        self._pie_menu = None
+        # The wheel (R2); None until first opened, then one shared
+        # instance, re-opened docked bottom-centre each time. The
+        # model is the window's copy of the wheel's pages (page key
+        # to (slices, empty-note)); _sync_wheel rebuilds it from
+        # the selected material. _wheel_param is the centre dial's
+        # binding (the last-touched knob); None binds roughness.
+        # _material_advanced is the Simple / Advanced mode (PO3)
+        # and _material_look the "Also set look" tick (T19): both
+        # session-only, never in the scene. _wheel_search is the
+        # wheel search box's text (filters the Style page).
+        self._wheel = None
+        self._wheel_model = {}
+        self._wheel_param = None
+        self._wheel_search = ""
+        self._material_advanced = False
+        self._material_look = False
+        # The centre-pane shortcuts (W/E/R/Q): the wheel disables
+        # them while a text field inside it has focus, so typing
+        # in the search box never switches the gizmo.
+        self._pane_shortcuts = []
         # UPD: the update flow's state. The checker and the
         # downloader live only while their work runs; the
         # release is the one the check found; the restart flag
@@ -1178,8 +1189,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._play_timer.stop()
         if self._emitter_editor is not None:
             self._emitter_editor.close()
-        if self._pie_menu is not None:
-            self._pie_menu.close()
+        if self._wheel is not None:
+            self._wheel.close_wheel()
         self._viewport.cleanup_gl()
         # UI3 (U5): remember where the window was for the next run.
         self._save_window_state()
@@ -1197,6 +1208,12 @@ class MainWindow(QtWidgets.QMainWindow):
         state = self._settings.value("window/splitter")
         if state is not None:
             self._splitter.restoreState(state)
+        # R2: the quality mode from the wheel's Depth page. An
+        # unknown stored value (an old build, a hand edit) falls
+        # back to auto rather than raising.
+        mode = self._settings.value("quality/mode", "auto")
+        if mode in ("auto", "final", "balanced", "draft"):
+            self._viewport.set_quality_mode(mode)
 
     def _save_window_state(self):
         """UI3 (U5): save the geometry + splitter positions now, and
@@ -1433,13 +1450,18 @@ class MainWindow(QtWidgets.QMainWindow):
             shortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
             shortcut.activated.connect(
                 lambda m=mode: self._set_gizmo_mode(m))
-        # Pie menu (UI9): Q opens the radial menu at the cursor.
-        # Same pane context as W/E/R — it fires when the viewport
-        # or the camera row has focus, never while typing in
-        # another pane.
-        pie_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Q"), pane)
-        pie_shortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
-        pie_shortcut.activated.connect(self._toggle_pie_menu)
+            self._pane_shortcuts.append(shortcut)
+        # The wheel (R2): Q opens it, docked bottom-centre over
+        # the viewport. Same pane context as W/E/R — it fires
+        # when the viewport or the camera row has focus, never
+        # while typing in another pane. The wheel disables these
+        # shortcuts while one of its own text fields has focus
+        # (see _on_wheel_text_focus).
+        wheel_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Q"), pane)
+        wheel_shortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
+        wheel_shortcut.activated.connect(self._toggle_wheel)
+        self._pane_shortcuts.append(wheel_shortcut)
+        self._center_pane = pane
         gizmo_row.addStretch(1)
         layout.addLayout(gizmo_row)
         layout.addWidget(self._viewport, 1)
@@ -1482,12 +1504,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_right(self):
         # Inspector (UI1): collapsible sections inside a scroll area,
-        # so the pane can grow (T19's material dropdown and T20's
-        # physics controls land in these sections) without crowding
-        # the window. Always-visible sections: Object, Transform,
-        # Material. Just-in-time sections (entry 004): Emitter
-        # (emitter objects only), Physics (objects with physics
-        # enabled — nothing yet, T20 fills it).
+        # so the pane can grow without crowding the window.
+        # Always-visible sections: Object, Transform. The Material
+        # section is gone (R2): the wheel is the material editor,
+        # and the inspector keeps only a one-line summary plus an
+        # "Edit material" button that opens it. Just-in-time
+        # sections (entry 004): Emitter (emitter objects only),
+        # Physics (objects with physics enabled — nothing yet, T20
+        # fills it).
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
@@ -1506,7 +1530,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._section_conditions = {}
         self._build_object_section(layout)
         self._build_transform_section(layout)
-        self._build_material_section(layout)
+        self._build_material_summary(layout)
         self._build_emitter_section(layout)
         self._build_physics_section(layout)
         layout.addStretch(1)
@@ -1561,158 +1585,32 @@ class MainWindow(QtWidgets.QMainWindow):
             body.addLayout(row)
             body.addWidget(self._help(group))
 
-    def _build_material_section(self, layout):
-        section = CollapsibleSection("Material")
-        self._sections["material"] = section
-        layout.addWidget(section)
-        body = section.body_layout
-        body.addWidget(QtWidgets.QLabel("Color"))
-        color_row = QtWidgets.QHBoxLayout()
-        self._color_btn = QtWidgets.QPushButton("Color…")
-        self._color_btn.clicked.connect(self._pick_color)
-        self._color_swatch = QtWidgets.QLabel("      ")
-        color_row.addWidget(self._color_btn)
-        color_row.addWidget(self._color_swatch)
-        color_row.addStretch(1)
-        body.addLayout(color_row)
-        body.addWidget(self._help("color"))
-        for label, key in (("Roughness", "roughness"),
-                           ("Metalness", "metalness")):
-            body.addWidget(QtWidgets.QLabel(label))
-            slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-            slider.setRange(0, 100)
-            slider.valueChanged.connect(
-                lambda v, k=key: self._on_material_slider(k, v / 100.0))
-            slider.sliderReleased.connect(self._commit_live_edit)
-            setattr(self, f"_{key}_slider", slider)
-            body.addWidget(slider)
-            body.addWidget(self._help(key))
-        body.addWidget(QtWidgets.QLabel("Texture"))
-        # Grouped by family (PO1): None first, then one disabled
-        # header row per family (no data, so a click or a hover
-        # on it does nothing — the handlers below already return
-        # early on a None item), then that family's styles with
-        # their plain-words names and style keys as item data.
-        self._texture_combo = QtWidgets.QComboBox()
-        self._texture_combo.addItem("None", "none")
-        for family_key, family_display in FAMILIES:
-            header_index = self._texture_combo.count()
-            self._texture_combo.addItem(family_display, None)
-            self._texture_combo.model().item(header_index).setEnabled(
-                False)
-            for style_key, style in STYLES.items():
-                if style["family"] != family_key:
-                    continue
-                self._texture_combo.addItem(style["display"], style_key)
-        self._texture_combo.currentIndexChanged.connect(
-            self._on_texture_changed)
-        # Hover-preview (UI12): hovering an item previews it,
-        # and the popup closing ends the preview — see
-        # _on_texture_highlighted and _PopupHideFilter.
-        self._texture_combo.highlighted.connect(
-            self._on_texture_highlighted)
-        body.addWidget(self._texture_combo)
-        body.addWidget(self._help("texture"))
-        # Simple / Advanced (PO3): Simple shows only the knobs
-        # that change the look most; Advanced shows every knob.
-        # Session-only, like the "Also set look" tick below —
-        # the checkbox lives on the window, never in the scene,
-        # and toggling it rebuilds the rows without touching the
-        # material (no undo step, no modified flag). Default is
-        # Simple (unchecked): the spec's default mode. The
-        # toggle is always visible, like the look tick — PO4's
-        # layout rows make it meaningful for nearly every style,
-        # so it stays put instead of appearing and vanishing with
-        # the style.
-        self._material_advanced_check = QtWidgets.QCheckBox(
-            "Show all settings")
-        self._material_advanced_check.toggled.connect(
-            self._on_material_advanced_toggled)
-        body.addWidget(self._material_advanced_check)
-        body.addWidget(self._help("material_advanced"))
-        # Per-material knobs (PO2): a container the rows are
-        # rebuilt into whenever the style changes — each style
-        # shows its own knobs (see _sync_param_rows), and "none"
-        # shows none. The container stays HIDDEN while it has no
-        # rows: an empty widget in the body layout still takes
-        # the layout's spacing around it, which lengthened the
-        # inspector by a few pixels and moved the scrollbar thumb
-        # by 1 px (37 px of diff in the 00 shot). Hidden, it
-        # takes no space at all, so the style-less inspector is
-        # pixel-identical to before PO2.
-        self._param_rows = QtWidgets.QWidget()
-        self._param_layout = QtWidgets.QVBoxLayout(self._param_rows)
-        self._param_layout.setContentsMargins(0, 0, 0, 0)
-        self._param_rows.setVisible(False)
-        self._param_spins = {}
-        # Layout rows (PO4): the picker combo and the size spins,
-        # rebuilt with the knobs in _sync_param_rows. None / empty
-        # while the current style takes no layout or the mode is
-        # Simple.
-        self._layout_combo = None
-        self._layout_spins = {}
-        # The wear spins (PO5): rebuilt with the knobs and the
-        # layout rows in _sync_param_rows. None / empty when the
-        # Life rows are hidden.
-        self._wear_spins = {}
-        body.addWidget(self._param_rows)
+    def _build_material_summary(self, layout):
+        # R2: the inspector's Material section is gone — the wheel
+        # is the material editor (plan §2.3). What stays in the
+        # inspector is a one-line summary (a swatch + the style
+        # name) and the way in: an "Edit material" button that
+        # opens the wheel. Not a section: it never collapses, and
+        # "material" is not in _sections.
+        layout.addWidget(QtWidgets.QLabel("Material"))
+        row = QtWidgets.QHBoxLayout()
+        self._material_swatch = QtWidgets.QLabel("      ")
+        row.addWidget(self._material_swatch)
+        self._material_name = QtWidgets.QLabel("")
+        row.addWidget(self._material_name, 1)
+        self._edit_material_btn = QtWidgets.QPushButton("Edit material")
+        self._edit_material_btn.clicked.connect(self._open_wheel)
+        row.addWidget(self._edit_material_btn)
+        layout.addLayout(row)
         # The re-bake debounce (see PARAM_REBAKE_MS): a knob
         # change restarts it, and the repaint fires once, 150 ms
-        # after the last change.
+        # after the last change. It lived in the Material section
+        # before R2; the wheel's dial drives the same knobs, so
+        # the timer lives here now.
         self._param_rebake_timer = QtCore.QTimer(self)
         self._param_rebake_timer.setSingleShot(True)
         self._param_rebake_timer.setInterval(PARAM_REBAKE_MS)
         self._param_rebake_timer.timeout.connect(self._viewport.update)
-        self._smooth_check = QtWidgets.QCheckBox("Smooth shading")
-        self._smooth_check.toggled.connect(self._on_smooth_shading_changed)
-        body.addWidget(self._smooth_check)
-        body.addWidget(self._help("smooth"))
-        # Physics (T19, Design 8): the preset picker and the three
-        # numbers it fills. The preset name is never stored — the
-        # picker derives it from the numbers on every refresh, so a
-        # hand-edit flips it to custom by itself.
-        body.addWidget(QtWidgets.QLabel("Preset"))
-        self._material_preset_combo = QtWidgets.QComboBox()
-        self._material_preset_combo.addItem("Custom", "custom")
-        for name, preset in MATERIAL_PRESETS.items():
-            self._material_preset_combo.addItem(preset["display"], name)
-        self._material_preset_combo.currentIndexChanged.connect(
-            self._on_material_preset_changed)
-        # Hover-preview (UI12): hovering a preset previews its
-        # look on the selected object (see
-        # _on_material_preset_highlighted).
-        self._material_preset_combo.highlighted.connect(
-            self._on_material_preset_highlighted)
-        # One hide filter for both popups: either popup closing
-        # ends the preview, whichever one opened it.
-        self._preview_hide_filter = _PopupHideFilter(
-            self, self._clear_material_preview)
-        self._texture_combo.view().installEventFilter(
-            self._preview_hide_filter)
-        self._material_preset_combo.view().installEventFilter(
-            self._preview_hide_filter)
-        body.addWidget(self._material_preset_combo)
-        body.addWidget(self._help("material_preset"))
-        self._material_look_check = QtWidgets.QCheckBox("Also set look")
-        body.addWidget(self._material_look_check)
-        body.addWidget(self._help("material_look"))
-        self._material_spins = {}
-        for label, key, low, high, step in (
-                ("Density", "density", 0.0, 100.0, 0.1),
-                ("Friction", "friction", 0.0, 5.0, 0.05),
-                ("Restitution", "restitution", 0.0, 1.0, 0.05)):
-            body.addWidget(QtWidgets.QLabel(label))
-            spin = QtWidgets.QDoubleSpinBox()
-            spin.setRange(low, high)
-            spin.setDecimals(2)
-            spin.setSingleStep(step)
-            spin.setMinimumWidth(48)
-            spin.valueChanged.connect(
-                lambda v, k=key: self._on_material_physics_changed(k, v))
-            spin.editingFinished.connect(self._commit_live_edit)
-            self._material_spins[key] = spin
-            body.addWidget(spin)
-            body.addWidget(self._help(key))
 
     def _build_emitter_section(self, layout):
         # Just-in-time (entry 004): only emitter objects have one.
@@ -1921,22 +1819,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._name_edit.setEnabled(enabled)
         for spin in self._spins.values():
             spin.setEnabled(enabled)
-        self._color_btn.setEnabled(enabled)
-        self._roughness_slider.setEnabled(enabled)
-        self._metalness_slider.setEnabled(enabled)
-        self._texture_combo.setEnabled(enabled)
-        self._material_preset_combo.setEnabled(enabled)
-        self._material_look_check.setEnabled(enabled)
-        # The Advanced toggle is session state like the look
-        # tick: enabled with a selection, never set here.
-        self._material_advanced_check.setEnabled(enabled)
-        for spin in self._material_spins.values():
-            spin.setEnabled(enabled)
-        # Smooth shading has no effect on a mesh object (T7): the
-        # asset's stored normals are used as-is, so the checkbox is
-        # disabled for meshes rather than silently ignored.
-        self._smooth_check.setEnabled(
-            enabled and (obj is None or obj.get("shape") != "mesh"))
+        # R2: the material lives on the wheel now. The inspector
+        # keeps only the summary + the button that opens the
+        # wheel, enabled with a selection.
+        self._edit_material_btn.setEnabled(enabled)
         self._cast_check.setEnabled(enabled)
         self._receive_check.setEnabled(enabled)
         # Just-in-time sections (UI1, entry 004): a section shows
@@ -1946,9 +1832,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._sections[name].setVisible(condition(obj))
         if obj is None:
             self._name_edit.setText("")
-            # No selection, no knobs (PO2): the rows from the
-            # previous selection must not linger.
-            self._sync_param_rows({})
+            # No selection: the summary clears and the wheel (if
+            # open) rebuilds with its material slices disabled.
+            self._material_name.setText("")
+            self._material_swatch.setStyleSheet("background: #b0b0b0;")
+            self._sync_wheel()
             self._refreshing = False
             return
         self._name_edit.setText(obj["name"])
@@ -1956,33 +1844,19 @@ class MainWindow(QtWidgets.QMainWindow):
             for i, axis in enumerate(("x", "y", "z")):
                 self._spins[(group, axis)].setValue(obj[group][i])
         mat = obj.get("material", {})
-        self._roughness_slider.setValue(int(float(mat.get("roughness", 0.6)) * 100))
-        self._metalness_slider.setValue(int(float(mat.get("metalness", 0.0)) * 100))
-        # "style" is canonical (PO1); fall back to "texture" for a
-        # material built by hand without a style key.
-        tex = mat.get("style", mat.get("texture", "none"))
-        # The combo shows plain words; the internal name is the item
-        # data (UI1), so look the row up by data, not by text.
-        idx = self._texture_combo.findData(tex)
-        self._texture_combo.setCurrentIndex(max(0, idx))
-        # The knobs follow the style (PO2): a selection change,
-        # an undo, or an open rebuilds them from the stored
-        # material, so they never show another object's values.
-        self._sync_param_rows(mat)
+        # The summary (R2): the style's plain-words name + its
+        # base color. "none" is a plain color, not a style.
+        style = resolve_material_style(mat)
+        entry = STYLES.get(style)
+        self._material_name.setText(
+            entry["display"] if entry is not None else "Plain color")
         color = mat.get("base_color", "#b0b0b0")
-        self._color_swatch.setStyleSheet(f"background: {color};")
-        # Physics (T19): the spins show the stored numbers; the
-        # picker derives its preset from them (the name is never
-        # stored). The look checkbox is a pick-time mode, not scene
-        # state — it keeps whatever the user last set it to.
-        for key, default in (("density", 1.0), ("friction", 0.5),
-                             ("restitution", 0.3)):
-            self._material_spins[key].setValue(
-                float(mat.get(key, default)))
-        self._sync_material_preset(mat)
-        smooth = obj.get("smooth_shading",
-                         default_smooth_shading(obj.get("shape", "box")))
-        self._smooth_check.setChecked(bool(smooth))
+        self._material_swatch.setStyleSheet(f"background: {color};")
+        # The wheel follows the selection (R2): a selection
+        # change, an undo, or an open rebuilds its pages from
+        # the stored material, so they never show another
+        # object's values. A no-op while the wheel is closed.
+        self._sync_wheel()
         self._cast_check.setChecked(bool(obj.get("cast_shadow", True)))
         self._receive_check.setChecked(bool(obj.get("receive_shadow", True)))
         if obj.get("kind") == "emitter":
@@ -1997,166 +1871,426 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"Shape: {params.get('shape', 'point')}")
         self._refreshing = False
 
-    def _sync_param_rows(self, mat):
-        # Rebuild the contextual knob rows for a material's style
-        # (PO2). Values come from the merged params (style
-        # defaults + stored overrides), converted to the knob's
-        # display units: spacing knobs show centimeters (the tile
-        # is one metre of material — see textures.py), value
-        # knobs show the param itself. The display value is
-        # rounded to the spin's decimals, so typing the value
-        # shown is a no-op instead of a tiny edit. Simple /
-        # Advanced (PO3): the rows shown are the mode's set —
-        # only the simple knobs in Simple, every knob in
-        # Advanced — so a hidden knob keeps its stored override
-        # and shows it again when the mode changes. PO4's layout
-        # rows slot in here, after the param knobs, Advanced-only,
-        # and PO5's wear rows follow them, under a "Life" label.
-        # The old
-        # rows are taken out of the layout and deleted at once,
-        # so a style with fewer knobs leaves nothing behind; the
-        # spins are built with their values set before the
-        # signals are connected, so syncing never fires a
-        # change. The deletion is shiboken6.delete, not
-        # deleteLater: probed on this PySide6 build,
-        # deleteLater() never deletes the widget (it stays
-        # parented and visible, and every style switch stacked
-        # another generation of rows on top of the last).
-        # Immediate deletion is safe here — the old spins are
-        # never the signal sender when this runs (the callers
-        # are the style pick, the inspector refresh, and the
-        # Advanced toggle, none of which is a knob spin). The
-        # one exception is the layout pick: the layout combo
-        # lives inside this container, so _on_layout_changed
-        # defers its rebuild a turn instead of calling this
-        # directly — deleting the sender mid-signal would crash.
-        while self._param_layout.count():
-            item = self._param_layout.takeAt(0)
-            if item.widget() is not None:
-                shiboken6.delete(item.widget())
-        self._param_spins = {}
-        self._layout_combo = None
-        self._layout_spins = {}
-        self._wear_spins = {}
-        style = resolve_material_style(mat)
-        params = merged_params(style, mat.get("params"))
-        for knob in param_knobs_for(
-                style, self._material_advanced_check.isChecked()):
-            self._param_layout.addWidget(
-                QtWidgets.QLabel(knob["label"]))
-            spin = QtWidgets.QDoubleSpinBox()
-            spin.setRange(knob["low"], knob["high"])
-            spin.setDecimals(knob["decimals"])
-            spin.setSingleStep(knob["step"])
-            spin.setMinimumWidth(48)
-            value = params.get(knob["param"])
-            if knob["kind"] == "spacing_cm":
-                value = count_to_spacing(value)
-            spin.setValue(round(value, knob["decimals"]))
-            spin.valueChanged.connect(
-                lambda v, k=knob: self._on_material_param_changed(k, v))
-            spin.editingFinished.connect(self._commit_live_edit)
-            self._param_spins[knob["param"]] = spin
-            self._param_layout.addWidget(spin)
-            self._param_layout.addWidget(self._help(knob["help"]))
-        # Layout rows (PO4): the picker + the current layout's
-        # size rows, Advanced-only, after the param knobs. A
-        # style with one layout ("solid" only) hides the picker
-        # entirely — there is nothing to choose. The picker and
-        # spins are rebuilt with the knobs on every sync, so
-        # they always match the stored material; the combo is
-        # built with its value set before the signals are
-        # connected, so syncing never fires a change. The layout
-        # combo gets the shared popup hide filter, so closing
-        # its popup ends a hover-preview like the texture and
-        # preset popups do.
-        if self._material_advanced_check.isChecked():
-            layouts = layouts_for_style(style)
-            if len(layouts) > 1:
-                current = resolve_layout(style, mat.get("layout"))
-                self._param_layout.addWidget(QtWidgets.QLabel("Layout"))
-                combo = QtWidgets.QComboBox()
-                for key in layouts:
-                    combo.addItem(LAYOUT_DISPLAY[key], key)
-                combo.setCurrentIndex(combo.findData(current))
-                combo.currentIndexChanged.connect(
-                    self._on_layout_changed)
-                combo.highlighted.connect(self._on_layout_highlighted)
-                combo.view().installEventFilter(
-                    self._preview_hide_filter)
-                self._layout_combo = combo
-                self._param_layout.addWidget(combo)
-                self._param_layout.addWidget(self._help("layout"))
-                width, length = merged_layout_size(
-                    current, mat.get("layout_size"))
-                sizes = {"board_width": width, "board_length": length}
-                for row in layout_rows_for(current):
-                    self._param_layout.addWidget(
-                        QtWidgets.QLabel(row["label"]))
-                    spin = QtWidgets.QDoubleSpinBox()
-                    spin.setRange(row["low"], row["high"])
-                    spin.setDecimals(row["decimals"])
-                    spin.setSingleStep(row["step"])
-                    spin.setMinimumWidth(48)
-                    spin.setValue(round(sizes[row["key"]],
-                                        row["decimals"]))
-                    spin.valueChanged.connect(
-                        lambda v, k=row: self._on_layout_size_changed(k, v))
-                    spin.editingFinished.connect(self._commit_live_edit)
-                    self._layout_spins[row["key"]] = spin
-                    self._param_layout.addWidget(spin)
-                    self._param_layout.addWidget(self._help(row["help"]))
-            # Wear rows (PO5): the Life rows — dirt, grime, edge
-            # wear, rust, moss, wetness, cracks — Advanced-only,
-            # after the layout rows. Every style takes some wear
-            # (the registry decides which), and a style-less
-            # material takes the generic set, so the rows show
-            # whenever Advanced is on. The values are percentages
-            # (cracks is a spacing in cm, 0 meaning no cracks),
-            # stored overrides-only in the material's "wear" dict.
-            # The spins are built with their values set before
-            # the signals are connected, so syncing never fires
-            # a change — the same shape as the knobs above.
-            wear_rows = wear_rows_for(style)
-            if wear_rows:
-                self._param_layout.addWidget(
-                    QtWidgets.QLabel("Life"))
-                wear = merged_wear(style, mat.get("wear"))
-                for row in wear_rows:
-                    self._param_layout.addWidget(
-                        QtWidgets.QLabel(row["label"]))
-                    spin = QtWidgets.QDoubleSpinBox()
-                    spin.setRange(row["low"], row["high"])
-                    spin.setDecimals(row["decimals"])
-                    spin.setSingleStep(row["step"])
-                    spin.setMinimumWidth(48)
-                    spin.setValue(round(wear[row["key"]],
-                                        row["decimals"]))
-                    spin.valueChanged.connect(
-                        lambda v, k=row: self._on_wear_changed(k, v))
-                    spin.editingFinished.connect(self._commit_live_edit)
-                    self._wear_spins[row["key"]] = spin
-                    self._param_layout.addWidget(spin)
-                    self._param_layout.addWidget(self._help(row["help"]))
-        # Hidden while empty, so a style-less material in Simple
-        # leaves the inspector exactly as it was before PO2.
-        self._param_rows.setVisible(
-            bool(self._param_spins) or self._layout_combo is not None
-            or bool(self._wear_spins))
-
-    def _on_material_advanced_toggled(self, _checked):
-        # Simple / Advanced (PO3): rebuild the knob rows for the
-        # current material under the new mode. The rows rebuild
-        # from the stored material, which holds every param
-        # (PO2's overrides-only model), so toggling never loses
-        # a value — a knob hidden in Simple keeps its override
-        # and shows it again in Advanced. No undo step, no
-        # modified flag: the scene is untouched.
-        if self._refreshing:
-            return
+    # -- wheel (R2): model, sync, dial binding ----------------------
+    def _wheel_material(self):
+        """(object, material dict) for the selection; (None, {})
+        with no selection."""
         obj = find_object(self.scene, self.selected_id) \
             if self.selected_id else None
-        self._sync_param_rows(obj.get("material", {}) if obj else {})
+        return obj, obj.get("material", {}) if obj is not None else {}
+
+    def _wheel_material_value(self, key, default):
+        _obj, mat = self._wheel_material()
+        return float(mat.get(key, default))
+
+    def _wheel_breadcrumb(self):
+        """The material path (PO7): family, style, layout — "Wood
+        · Cathedral oak · Herringbone". A plain color has no path."""
+        _obj, mat = self._wheel_material()
+        style = resolve_material_style(mat)
+        entry = STYLES.get(style)
+        if entry is None:
+            return "Plain color"
+        family = dict(FAMILIES).get(entry["family"], entry["family"])
+        parts = [family, entry["display"]]
+        layout = resolve_layout(style, mat.get("layout"))
+        if layout != "solid":
+            parts.append(LAYOUT_DISPLAY[layout])
+        return " · ".join(parts)
+
+    @staticmethod
+    def _wheel_default_help():
+        return ("Q closes the wheel. Click a slice to pick it; "
+                "click a knob to load it into the dial.")
+
+    def _style_entries(self):
+        """("none" + every style, in family order, with the swatch
+        color): the Style page's slices."""
+        entries = [("none", "None", None)]
+        for family_key, _display in FAMILIES:
+            for key, entry in STYLES.items():
+                if entry["family"] == family_key:
+                    entries.append((key, entry["display"],
+                                    entry["base_color"]))
+        return entries
+
+    def _wheel_slices(self, page):
+        """The wheel model's slices for a page (test hook)."""
+        if page not in self._wheel_model:
+            self._wheel_model = self._wheel_model_dict()
+        return self._wheel_model[page][0]
+
+    def _find_wheel_slice(self, page, key):
+        slices, _note = self._wheel_model.get(page, ([], None))
+        for slice_ in slices:
+            if slice_.key == key:
+                return slice_
+        return None
+
+    def _wheel_model_dict(self):
+        """The wheel's pages for the selected material: page key to
+        (slices, empty-note). Rebuilt from the stored material on
+        every sync, so the wheel never shows another object's
+        values. The Depth page is app state, not material — it
+        stays enabled with no selection, while every material
+        slice disables."""
+        obj, mat = self._wheel_material()
+        enabled = obj is not None
+        style = resolve_material_style(mat)
+        advanced = self._material_advanced
+        model = {}
+
+        # Material: the look knobs, smooth shading, the
+        # Simple / Advanced toggle.
+        rough = self._look_binding("roughness")
+        metal = self._look_binding("metalness")
+        smooth = obj.get(
+            "smooth_shading",
+            default_smooth_shading(obj.get("shape", "box"))) \
+            if obj is not None else False
+        # Smooth shading has no effect on a mesh object (T7):
+        # the asset's stored normals are used as-is, so the
+        # toggle is disabled for meshes rather than silently
+        # ignored.
+        smooth_enabled = enabled and obj.get("shape") != "mesh"
+        model["material"] = ([
+            WheelSlice("roughness", "Roughness", kind="knob",
+                       value=self._format_knob_value(rough),
+                       enabled=enabled, help_key="roughness",
+                       payload={"bind": rough}),
+            WheelSlice("metalness", "Metalness", kind="knob",
+                       value=self._format_knob_value(metal),
+                       enabled=enabled, help_key="metalness",
+                       payload={"bind": metal}),
+            WheelSlice("smooth", "Smooth shading", kind="toggle",
+                       value="On" if smooth else "Off",
+                       checked=smooth, enabled=smooth_enabled,
+                       help_key="smooth",
+                       payload={"toggle": "smooth"}),
+            WheelSlice("advanced", "Show all settings", kind="toggle",
+                       value="On" if advanced else "Off",
+                       checked=advanced, enabled=enabled,
+                       help_key="material_advanced",
+                       payload={"toggle": "advanced"}),
+        ], None)
+
+        # Style: every style at once, no paging, no cap — plus
+        # None first. The search box filters by name.
+        query = self._wheel_search.strip().lower()
+        style_slices = []
+        for key, display, swatch in self._style_entries():
+            if query and query not in display.lower():
+                continue
+            style_slices.append(WheelSlice(
+                key, display, kind="pick", swatch=swatch,
+                checked=(style == key), enabled=enabled,
+                help_key="texture", payload={"apply": ("style", key)}))
+        style_note = None
+        if not style_slices:
+            style_note = 'No style matches "%s".' \
+                % self._wheel_search.strip()
+        model["style"] = (style_slices, style_note)
+
+        # Layout: the style's layouts, plus the current layout's
+        # size knobs in Advanced. A style with one layout shows
+        # just that one — there is nothing to choose.
+        layout = resolve_layout(style, mat.get("layout"))
+        layout_slices = [
+            WheelSlice(key, LAYOUT_DISPLAY[key], kind="pick",
+                       checked=(layout == key), enabled=enabled,
+                       help_key="layout",
+                       payload={"apply": ("layout", key)})
+            for key in layouts_for_style(style)]
+        if advanced:
+            for row in layout_rows_for(layout):
+                binding = self._layout_size_binding(row)
+                layout_slices.append(WheelSlice(
+                    "size_" + row["key"], row["label"], kind="knob",
+                    value=self._format_knob_value(binding),
+                    enabled=enabled, help_key=row["help"],
+                    payload={"bind": binding}))
+        model["layout"] = (layout_slices, None)
+
+        # Detail: the style's own knobs (PO2). Simple shows only
+        # the simple knobs; Advanced shows every knob.
+        detail_slices = []
+        for knob in param_knobs_for(style, advanced):
+            binding = self._param_binding(knob)
+            detail_slices.append(WheelSlice(
+                knob["param"], knob["label"], kind="knob",
+                value=self._format_knob_value(binding),
+                enabled=enabled, help_key=knob["help"],
+                payload={"bind": binding}))
+        detail_note = None
+        if not detail_slices:
+            if obj is None:
+                detail_note = "Select an object first."
+            elif style == "none":
+                detail_note = ("Pick a style first: a plain color "
+                               "has no detail knobs.")
+            else:
+                detail_note = "This style has no detail knobs."
+        model["detail"] = (detail_slices, detail_note)
+
+        # Form: the physics presets (T19) + the "Also set look"
+        # tick. The preset name is never stored — the checked
+        # slice derives from the numbers on every sync, so a
+        # hand-edit flips it to Custom by itself.
+        preset = material_preset_for(mat)
+        form_slices = [WheelSlice(
+            "custom", "Custom", kind="pick",
+            checked=(preset == "custom"), enabled=enabled,
+            help_key="material_preset",
+            payload={"apply": ("preset", "custom")})]
+        for name, entry in MATERIAL_PRESETS.items():
+            form_slices.append(WheelSlice(
+                name, entry["display"], kind="pick",
+                checked=(preset == name), enabled=enabled,
+                help_key="material_preset",
+                payload={"apply": ("preset", name)}))
+        form_slices.append(WheelSlice(
+            "look", "Also set look", kind="toggle",
+            value="On" if self._material_look else "Off",
+            checked=self._material_look, enabled=enabled,
+            help_key="material_look", payload={"toggle": "look"}))
+        model["form"] = (form_slices, None)
+
+        # Surface: the three physics numbers (T19), as dial
+        # knobs — the dial's click-to-type path keeps them exact
+        # (§2.3's field guidance, via the typed path instead of
+        # a spin box).
+        surface_slices = []
+        for label, key, low, high, step in (
+                ("Density", "density", 0.0, 100.0, 0.1),
+                ("Friction", "friction", 0.0, 5.0, 0.05),
+                ("Restitution", "restitution", 0.0, 1.0, 0.05)):
+            binding = self._physics_binding(key, label, low, high,
+                                            step)
+            surface_slices.append(WheelSlice(
+                key, label, kind="knob",
+                value=self._format_knob_value(binding),
+                enabled=enabled, help_key=key,
+                payload={"bind": binding}))
+        model["surface"] = (surface_slices, None)
+
+        # Life: the wear knobs (PO5), Advanced-only.
+        life_slices = []
+        life_note = None
+        if obj is None:
+            life_note = "Select an object first."
+        elif not advanced:
+            life_note = ("Wear controls live in Advanced: turn on "
+                         "Show all settings on the Material page.")
+        else:
+            for row in wear_rows_for(style):
+                binding = self._wear_binding(row)
+                life_slices.append(WheelSlice(
+                    row["key"], row["label"], kind="knob",
+                    value=self._format_knob_value(binding),
+                    enabled=enabled, help_key=row["help"],
+                    payload={"bind": binding}))
+        model["life"] = (life_slices, life_note)
+
+        # Colour: the picker + the quick chips.
+        colour_slices = [WheelSlice(
+            "picker", "Pick a color…", kind="action",
+            enabled=enabled, help_key="color",
+            payload={"action": "pick_color"})]
+        current_color = mat.get("base_color", "#b0b0b0").lower()
+        for label, hex_color in WHEEL_COLOR_CHIPS:
+            colour_slices.append(WheelSlice(
+                hex_color, label, kind="pick", swatch=hex_color,
+                checked=(current_color == hex_color),
+                enabled=enabled, help_key="color",
+                payload={"apply": ("color", hex_color)}))
+        model["colour"] = (colour_slices, None)
+
+        # Depth: the quality toggles (UI15) — the tuner ladder
+        # surfaced on the wheel. App state, always enabled.
+        mode = self._viewport.quality_mode
+        model["depth"] = ([
+            WheelSlice(key, label, kind="pick",
+                       checked=(mode == key), help_key="quality",
+                       payload={"apply": ("quality", key)})
+            for key, label in (("draft", "Draft"),
+                               ("balanced", "Balanced"),
+                               ("final", "Final"),
+                               ("auto", "Auto"))], None)
+
+        # Saved: PO10's home. The backend lands later; until
+        # then the page says so honestly instead of pretending.
+        model["saved"] = ([], "Nothing saved yet: the saved "
+                               "library arrives with PO10.")
+        return model
+
+    def _sync_wheel(self):
+        """Rebuild the wheel's pages from the selected material
+        and push the current page to the wheel, with the
+        breadcrumb and the centre dial's value. A no-op while
+        the wheel has never been opened. The dial's BINDING is
+        untouched — the last-touched parameter persists across
+        page switches and selection changes; only its value
+        re-syncs from the material."""
+        if self._wheel is None:
+            return
+        self._wheel_model = self._wheel_model_dict()
+        page = self._wheel.page
+        slices, note = self._wheel_model[page]
+        self._wheel.set_slices(slices, note)
+        self._wheel.set_breadcrumb(self._wheel_breadcrumb())
+        self._sync_wheel_dial()
+
+    # -- the centre dial -------------------------------------------
+    def _sync_wheel_dial(self):
+        """Sync the centre dial's value from the material. With no
+        binding yet, the dial starts on Roughness — the
+        most-touched look knob. A binding whose parameter no
+        longer exists for this material (a style pick removed
+        the knob the dial was showing) falls back to Roughness
+        instead of crashing the sync: the dial shows a
+        parameter that exists."""
+        if self._wheel_param is None:
+            self._bind_wheel_dial(self._look_binding("roughness"))
+            return
+        try:
+            value = self._wheel_param["read"]()
+        except (TypeError, ValueError, KeyError):
+            value = None
+        if value is None:
+            self._wheel_param = None
+            self._bind_wheel_dial(self._look_binding("roughness"))
+            return
+        dial = self._wheel.dial
+        dial.blockSignals(True)
+        dial.setValue(value)
+        dial.blockSignals(False)
+
+    def _bind_wheel_dial(self, binding):
+        """Load a knob into the centre dial: its range, step,
+        decimals and unit, its current value, and its name above
+        the dial. The binding persists across page switches."""
+        self._wheel_param = binding
+        dial = self._wheel.dial
+        dial.blockSignals(True)
+        dial.setRange(binding["min"], binding["max"])
+        dial.setStep(binding["step"])
+        dial.setDecimals(binding["decimals"])
+        dial.setUnit(binding["unit"])
+        dial.setValue(binding["read"]())
+        dial.blockSignals(False)
+        self._wheel.set_dial_label(binding["label"])
+        self._wheel.set_help(FIELD_HELP[binding["help"]])
+
+    def _on_wheel_dial_changed(self, value):
+        """The centre dial moved: apply the value through the
+        binding's write path (the same handlers the inspector
+        spins used), then refresh the wheel so the slice value
+        texts and the preset's checked state follow live."""
+        if self._refreshing or self._wheel_param is None:
+            return
+        self._wheel_param["write"](value)
+        self._sync_wheel()
+
+    @staticmethod
+    def _format_knob_value(binding):
+        """A knob slice's readout: the value at the binding's
+        decimals, with its unit ("75%", "1.6 cm", "0.70")."""
+        text = f"{binding['read']():.{binding['decimals']}f}"
+        if binding["unit"] == "%":
+            return text + "%"
+        if binding["unit"]:
+            return text + " " + binding["unit"]
+        return text
+
+    def _look_binding(self, key):
+        label = "Roughness" if key == "roughness" else "Metalness"
+        default = 0.6 if key == "roughness" else 0.0
+        return {
+            "label": label, "help": key,
+            "min": 0.0, "max": 1.0, "step": 0.05, "decimals": 2,
+            "unit": "",
+            "read": lambda: self._wheel_material_value(key, default),
+            "write": lambda v: self._on_material_slider(key, v),
+        }
+
+    def _param_binding(self, knob):
+        """A Detail knob's binding: display units for the dial
+        (spacing knobs show centimeters, like the old spins)."""
+        def read():
+            _obj, mat = self._wheel_material()
+            style = resolve_material_style(mat)
+            value = merged_params(style, mat.get("params")).get(
+                knob["param"])
+            if knob["kind"] == "spacing_cm":
+                value = count_to_spacing(value)
+            return round(value, knob["decimals"])
+        return {
+            "label": knob["label"], "help": knob["help"],
+            "min": knob["low"], "max": knob["high"],
+            "step": knob["step"], "decimals": knob["decimals"],
+            "unit": "cm" if knob["kind"] == "spacing_cm" else "",
+            "read": read,
+            "write": lambda v: self._on_material_param_changed(knob, v),
+        }
+
+    def _layout_size_binding(self, row):
+        def read():
+            _obj, mat = self._wheel_material()
+            style = resolve_material_style(mat)
+            layout = resolve_layout(style, mat.get("layout"))
+            width, length = merged_layout_size(
+                layout, mat.get("layout_size"))
+            sizes = {"board_width": width, "board_length": length}
+            return round(sizes[row["key"]], row["decimals"])
+        return {
+            "label": row["label"], "help": row["help"],
+            "min": row["low"], "max": row["high"],
+            "step": row["step"], "decimals": row["decimals"],
+            "unit": "cm",
+            "read": read,
+            "write": lambda v: self._on_layout_size_changed(row, v),
+        }
+
+    def _wear_binding(self, row):
+        def read():
+            _obj, mat = self._wheel_material()
+            style = resolve_material_style(mat)
+            return round(merged_wear(style, mat.get("wear")).get(
+                row["key"], 0.0), row["decimals"])
+        return {
+            "label": row["label"], "help": row["help"],
+            "min": row["low"], "max": row["high"],
+            "step": row["step"], "decimals": row["decimals"],
+            "unit": "%" if row["kind"] == "percent" else "cm",
+            "read": read,
+            "write": lambda v: self._on_wear_changed(row, v),
+        }
+
+    def _physics_binding(self, key, label, low, high, step):
+        defaults = {"density": 1.0, "friction": 0.5,
+                    "restitution": 0.3}
+        return {
+            "label": label, "help": key,
+            "min": low, "max": high, "step": step, "decimals": 2,
+            "unit": "",
+            "read": lambda: self._wheel_material_value(
+                key, defaults[key]),
+            "write": lambda v: self._on_material_physics_changed(
+                key, v),
+        }
+
+    def _on_material_advanced_toggled(self, checked):
+        # Simple / Advanced (PO3): the mode is session state —
+        # the flag lives on the window, never in the scene.
+        # Toggling rebuilds the wheel's pages for the current
+        # material under the new mode, without touching the
+        # material (no undo step, no modified flag). A knob
+        # hidden in Simple keeps its stored override and shows
+        # it again in Advanced.
+        if self._refreshing:
+            return
+        self._material_advanced = bool(checked)
+        self._sync_wheel()
 
     def _refresh_counts(self):
         # Mesh triangles come from the assets' recorded counts via
@@ -2295,58 +2429,152 @@ class MainWindow(QtWidgets.QMainWindow):
         self._viewport.set_gizmo_mode(mode)
         self._gizmo_buttons[mode].setChecked(True)
 
-    # -- pie menu (UI9) --------------------------------------------------
-    def _pie_slices(self):
-        """The UI9 pie: gizmo modes on the top arc, Add on the
-        bottom arc — Move north, then clockwise: Rotate, Scale,
-        Box, Sphere, Cylinder, Cone, Plane. The actions are the
-        same code paths as the toolbar buttons and the Add panel,
-        not copies."""
-        return [
-            PieSlice("Move",
-                     lambda: self._set_gizmo_mode("move")),
-            PieSlice("Rotate",
-                     lambda: self._set_gizmo_mode("rotate")),
-            PieSlice("Scale",
-                     lambda: self._set_gizmo_mode("scale")),
-            PieSlice("Box", lambda: self._add_object("box")),
-            PieSlice("Sphere", lambda: self._add_object("sphere")),
-            PieSlice("Cylinder",
-                     lambda: self._add_object("cylinder")),
-            PieSlice("Cone", lambda: self._add_object("cone")),
-            PieSlice("Plane", lambda: self._add_object("plane")),
-        ]
-
-    def _toggle_pie_menu(self):
-        """Q: open the pie at the cursor, or close it if it is
-        open. Closing through close() reports a dismiss, so focus
-        still returns to the viewport."""
-        if self._pie_menu is not None and self._pie_menu.isVisible():
-            self._pie_menu.close()
+    # -- wheel (R2): open, close, dispatch ----------------------------
+    def _toggle_wheel(self):
+        """Q: open the wheel, or close it if it is open. Closing
+        hands focus back to the viewport so W/E/R keep working."""
+        if self._wheel is not None and self._wheel.isVisible():
+            self._close_wheel()
             return
-        self._open_pie_menu()
+        self._open_wheel()
 
-    def _open_pie_menu(self):
-        """Open the pie menu at the cursor (UI9), clamped to the
-        viewport. Opening changes nothing — no re-render, no
-        camera move, no selection change, no undo step."""
-        if self._pie_menu is None:
-            self._pie_menu = PieMenu(self._pie_slices(),
-                                     self._viewport)
-            self._pie_menu.picked.connect(self._on_pie_picked)
-            self._pie_menu.dismissed.connect(self._on_pie_dismissed)
-        bounds = QtCore.QRect(
-            self._viewport.mapToGlobal(QtCore.QPoint(0, 0)),
-            self._viewport.size())
-        self._pie_menu.open_at(QtGui.QCursor.pos(), bounds)
+    def _open_wheel(self):
+        """Open the wheel docked bottom-centre over the viewport.
+        Opening changes nothing — no re-render, no camera move,
+        no selection change, no undo step — but it syncs the
+        pages from the selected material first."""
+        if self._wheel is None:
+            self._wheel = Wheel(self._center_pane)
+            self._wheel.page_changed.connect(
+                self._on_wheel_page_changed)
+            self._wheel.slice_activated.connect(
+                self._on_wheel_slice_activated)
+            self._wheel.slice_hovered.connect(
+                self._on_wheel_slice_hovered)
+            self._wheel.slice_hover_cleared.connect(
+                self._on_wheel_slice_hover_cleared)
+            self._wheel.search_changed.connect(
+                self._on_wheel_search_changed)
+            self._wheel.close_requested.connect(self._close_wheel)
+            self._wheel.text_focus_changed.connect(
+                self._on_wheel_text_focus)
+            self._wheel.dial.valueChanged.connect(
+                self._on_wheel_dial_changed)
+            self._wheel.dial.editingFinished.connect(
+                self._commit_live_edit)
+            self._wheel.set_help(self._wheel_default_help())
+        self._sync_wheel()
+        self._wheel.open()
 
-    def _on_pie_picked(self, _index):
-        # The slice's own action already ran; the menu just hands
-        # focus back to the viewport so W/E/R keep working.
+    def _close_wheel(self):
+        if self._wheel is None:
+            return
+        # Closing ends any hover-preview (UI12): the object
+        # renders from its stored material again.
+        self._clear_material_preview()
+        self._wheel.close_wheel()
         self._viewport.setFocus()
 
-    def _on_pie_dismissed(self):
-        self._viewport.setFocus()
+    def _on_wheel_page_changed(self, _key):
+        # A page switch shows that page's slices; the centre dial
+        # keeps its binding (the last-touched parameter persists).
+        self._sync_wheel()
+
+    def _on_wheel_search_changed(self, text):
+        # Typing filters the Style page by name — and jumps to
+        # it, since the matches are styles. Clearing the search
+        # restores every style and stays on the page.
+        self._wheel_search = text
+        if text and self._wheel.page != "style":
+            self._wheel.set_page("style")
+        self._sync_wheel()
+
+    def _on_wheel_text_focus(self, focused):
+        # A text field inside the wheel (the search box, the
+        # dial's type-in editor) has focus: the pane shortcuts
+        # (W/E/R/Q) go quiet, so typing "wood" never switches
+        # the gizmo. They come back when the field loses focus.
+        for shortcut in self._pane_shortcuts:
+            shortcut.setEnabled(not focused)
+
+    def _on_wheel_slice_activated(self, page, key):
+        """A wheel slice was clicked (or Entered): dispatch on its
+        payload — bind a knob to the centre dial, apply a pick,
+        flip a toggle, or run an action."""
+        slice_ = self._find_wheel_slice(page, key)
+        if slice_ is None or not slice_.enabled:
+            return
+        payload = slice_.payload
+        if "bind" in payload:
+            self._bind_wheel_dial(payload["bind"])
+            return
+        if "apply" in payload:
+            kind, name = payload["apply"]
+            if kind == "style":
+                self._apply_style(name)
+            elif kind == "layout":
+                self._apply_layout(name)
+            elif kind == "preset":
+                self._apply_preset(name)
+            elif kind == "color":
+                self._apply_color(name)
+            elif kind == "quality":
+                self._apply_quality_mode(name)
+        elif "toggle" in payload:
+            name = payload["toggle"]
+            if name == "smooth":
+                obj, _mat = self._wheel_material()
+                if obj is not None:
+                    current = obj.get(
+                        "smooth_shading",
+                        default_smooth_shading(
+                            obj.get("shape", "box")))
+                    self._on_smooth_shading_changed(not current)
+            elif name == "advanced":
+                self._on_material_advanced_toggled(
+                    not self._material_advanced)
+            elif name == "look":
+                self._material_look = not self._material_look
+        elif payload.get("action") == "pick_color":
+            self._pick_color()
+        self._refresh_inspector()
+
+    def _on_wheel_slice_hovered(self, page, key):
+        """Hovering a slice (UI12): show its plain-words help, and
+        preview it when it has a look — a style, a layout, a
+        preset, a color chip. Knobs and toggles show help only,
+        and end any preview in progress."""
+        slice_ = self._find_wheel_slice(page, key)
+        if slice_ is None:
+            return
+        if slice_.help_key:
+            self._wheel.set_help(FIELD_HELP[slice_.help_key])
+        payload = slice_.payload
+        if "apply" in payload:
+            kind, name = payload["apply"]
+            if kind == "style":
+                self._preview_style(name)
+            elif kind == "layout":
+                self._preview_layout(name)
+            elif kind == "preset":
+                self._preview_preset(name)
+            elif kind == "color":
+                self._preview_color(name)
+            else:
+                self._clear_material_preview()
+        else:
+            self._clear_material_preview()
+
+    def _on_wheel_slice_hover_cleared(self):
+        """The pointer left the ring: the preview ends and the
+        help line goes back to the loaded knob (or the default
+        hint when no knob is loaded)."""
+        self._clear_material_preview()
+        if self._wheel_param is not None:
+            self._wheel.set_help(
+                FIELD_HELP[self._wheel_param["help"]])
+        else:
+            self._wheel.set_help(self._wheel_default_help())
 
     def _on_outliner_changed(self, current, _previous):
         if self._refreshing or current is None:
@@ -2503,29 +2731,27 @@ class MainWindow(QtWidgets.QMainWindow):
             obj.setdefault("material", {})[key] = round(value, 2)
             self._viewport.update()
 
-    def _on_texture_changed(self, index):
-        # The combo shows plain words; the internal name is the item
-        # data (UI1) — that is what the material stores.
+    def _apply_style(self, name):
+        """Pick a style (PO1) from the wheel's Style page: one
+        undo step. The material stores the internal name; the
+        wheel shows plain words."""
         if self._refreshing:
             return
         obj = find_object(self.scene, self.selected_id) if self.selected_id else None
         if obj is None:
             return
-        text = self._texture_combo.itemData(index)
-        if text is None:
-            return
-        if obj.get("material", {}).get("texture") != text:
+        if obj.get("material", {}).get("texture") != name:
             self._clear_material_preview()
             self._push_undo()
             # "style" is canonical (PO1); "texture" mirrors it for
             # the viewport — the two stay equal.
             mat = obj.setdefault("material", {})
-            mat["style"] = text
-            mat["texture"] = text
+            mat["style"] = name
+            mat["texture"] = name
             # A new style starts from its own defaults (PO2):
             # params holds overrides only, so an empty dict IS
             # the new style's defaults. The reset rides in the
-            # same undo step as the pick, and the knob rows
+            # same undo step as the pick, and the wheel's pages
             # rebuild for the new style at once.
             mat["params"] = {}
             # A new style starts from its own layout too (PO4):
@@ -2533,7 +2759,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # the sizes clear, in the same undo step — a stored
             # herringbone must not follow the material onto a
             # style that takes no layout.
-            mat["layout"] = default_layout(text)
+            mat["layout"] = default_layout(name)
             mat["layout_size"] = {}
             # And clean (PO5): wear clears in the same step, so
             # a rusted metal's rust does not follow the material
@@ -2545,23 +2771,14 @@ class MainWindow(QtWidgets.QMainWindow):
             # red-brown, so the pick reads as its name at once
             # instead of as grey with a pattern on it. Picking
             # "none" leaves the look alone: a plain color is the
-            # user's own choice, not a style's. The swatch and
-            # the two sliders sync at once, under the refreshing
-            # flag so the slider moves push no extra undo steps.
-            look = style_look(text)
+            # user's own choice, not a style's. The summary and
+            # the wheel sync through _refresh_inspector.
+            look = style_look(name)
             if look is not None:
                 mat["base_color"] = look["base_color"]
                 mat["roughness"] = look["roughness"]
                 mat["metalness"] = look["metalness"]
-                self._refreshing = True
-                self._color_swatch.setStyleSheet(
-                    f"background: {look['base_color']};")
-                self._roughness_slider.setValue(
-                    int(look["roughness"] * 100))
-                self._metalness_slider.setValue(
-                    int(look["metalness"] * 100))
-                self._refreshing = False
-            self._sync_param_rows(mat)
+            self._refresh_inspector()
             self._viewport.update()
 
     def _preview_material(self, overrides):
@@ -2580,16 +2797,12 @@ class MainWindow(QtWidgets.QMainWindow):
         from every exit path (popup close, pick, refresh)."""
         self._viewport.clear_material_preview()
 
-    def _on_texture_highlighted(self, index):
-        # Hovering a texture previews it on the selected object
-        # (UI12, entry 017): see it before you commit. The
-        # highlighted signal fires on mouse hover and on arrow-key
-        # moves alike, so keyboard browsing previews too.
+    def _preview_style(self, name):
+        """Hovering a style previews it on the selected object
+        (UI12, entry 017): see it before you commit. Hovering
+        and arrow-key moves preview alike, so keyboard browsing
+        previews too."""
         if self._refreshing:
-            return
-        name = self._texture_combo.itemData(index)
-        if name is None:
-            self._clear_material_preview()
             return
         # The previewed style shows with ITS defaults (PO2): the
         # override pins params to empty, so the stored params of
@@ -2609,55 +2822,62 @@ class MainWindow(QtWidgets.QMainWindow):
             overrides.update(look)
         self._preview_material(overrides)
 
-    def _on_material_preset_highlighted(self, index):
-        # Hovering a preset previews its look (UI12, entry 017):
-        # the roughness and metalness from the visual hint. The
-        # physics numbers change no pixel, so the look is what
-        # there is to see. Custom has no look: hovering it
-        # restores. The preview shows the hint whether or not
-        # "Also set look" is ticked — the tick governs what a
-        # click applies, not what can be seen (a tick-off click
-        # applies the numbers only, so the look snaps back).
+    def _preview_preset(self, name):
+        """Hovering a preset previews its look (UI12, entry 017):
+        the roughness and metalness from the visual hint. The
+        physics numbers change no pixel, so the look is what
+        there is to see. Custom has no look: hovering it
+        restores. The preview shows the hint whether or not
+        "Also set look" is ticked — the tick governs what a
+        click applies, not what can be seen (a tick-off click
+        applies the numbers only, so the look snaps back)."""
         if self._refreshing:
             return
-        name = self._material_preset_combo.itemData(index)
-        if name is None or name == "custom":
+        if name == "custom":
             self._clear_material_preview()
             return
         preset = MATERIAL_PRESETS[name]
         self._preview_material({"roughness": preset["roughness"],
                                 "metalness": preset["metalness"]})
 
-    def _sync_material_preset(self, mat):
-        # The picker shows the preset the stored numbers match, or
-        # Custom. Signals blocked: this is a sync, not a pick.
-        name = material_preset_for(mat)
-        self._material_preset_combo.blockSignals(True)
-        self._material_preset_combo.setCurrentIndex(
-            self._material_preset_combo.findData(name))
-        self._material_preset_combo.blockSignals(False)
+    def _preview_layout(self, name):
+        """Hovering a layout previews it on the selected object
+        (UI12, entry 017): see it before you commit. The
+        previewed layout shows with the stored sizes — the
+        sizes are shared across layouts, so there is nothing
+        to pin. Restoring returns the stored layout."""
+        if self._refreshing:
+            return
+        self._preview_material({"layout": name})
 
-    def _on_material_preset_changed(self, index):
-        # Picking a preset fills the three physics numbers (one undo
-        # step) and, only with "Also set look" ticked, the roughness
-        # and metalness from the visual hint. Picking Custom keeps
-        # the values and just renames them — since the name is never
-        # stored, the picker re-derives from the numbers at once, so
-        # a Custom pick on steel's numbers shows steel again.
+    def _preview_color(self, hex_color):
+        """Hovering a color chip previews it (UI12): the base
+        color only — the style, pattern and wear stay as they
+        are."""
+        if self._refreshing:
+            return
+        self._preview_material({"base_color": hex_color})
+
+    def _apply_preset(self, name):
+        """Pick a preset (T19) from the wheel's Form page: it
+        fills the three physics numbers (one undo step) and,
+        only with "Also set look" ticked, the roughness and
+        metalness from the visual hint. Picking Custom keeps
+        the values and just renames them — since the name is
+        never stored, the wheel re-derives from the numbers at
+        once, so a Custom pick on steel's numbers shows steel
+        again."""
         if self._refreshing:
             return
         obj = find_object(self.scene, self.selected_id) if self.selected_id else None
         if obj is None:
             return
-        name = self._material_preset_combo.itemData(index)
-        if name is None:
-            return
         mat = obj.setdefault("material", {})
         if name == "custom":
-            self._sync_material_preset(mat)
+            self._refresh_inspector()
             return
         preset = MATERIAL_PRESETS[name]
-        look = self._material_look_check.isChecked()
+        look = self._material_look
         if (mat.get("density") == preset["density"]
                 and mat.get("friction") == preset["friction"]
                 and mat.get("restitution") == preset["restitution"]
@@ -2676,12 +2896,39 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_inspector()
         self._viewport.update()
 
+    def _apply_color(self, hex_color):
+        """Pick a color chip from the wheel's Colour page: one
+        undo step, the base color only."""
+        if self._refreshing:
+            return
+        obj = find_object(self.scene, self.selected_id) if self.selected_id else None
+        if obj is None:
+            return
+        mat = obj.setdefault("material", {})
+        if mat.get("base_color", "").lower() == hex_color.lower():
+            return
+        self._clear_material_preview()
+        self._push_undo()
+        mat["base_color"] = hex_color
+        self._refresh_inspector()
+        self._viewport.update()
+
+    def _apply_quality_mode(self, mode):
+        """Pick a quality mode from the wheel's Depth page (UI15):
+        pin the tuner ladder, or hand it back to Auto. The mode
+        persists in QSettings for the next launch."""
+        self._viewport.set_quality_mode(mode)
+        if self._settings is not None:
+            self._settings.setValue("quality/mode", mode)
+            self._settings.sync()
+
     def _on_material_physics_changed(self, key, value):
         # A hand-edit (live-edit pattern, like the transform spins):
         # the gesture arms on the first change and commits on
-        # editingFinished. The picker re-derives at once, so an edit
-        # away from a preset flips it to custom live. No viewport
-        # update — the numbers change no pixel until T20 simulates.
+        # editingFinished. The wheel re-derives the preset at once
+        # (the dial handler syncs it), so an edit away from a
+        # preset flips it to custom live. No viewport update —
+        # the numbers change no pixel until T20 simulates.
         if self._refreshing:
             return
         obj = find_object(self.scene, self.selected_id) if self.selected_id else None
@@ -2692,7 +2939,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if mat.get(key) != value:
             self._arm_live_edit()
             mat[key] = value
-            self._sync_material_preset(mat)
 
     def _on_material_param_changed(self, knob, value):
         # A knob edit (PO2, live-edit pattern, like the transform
@@ -2739,22 +2985,19 @@ class MainWindow(QtWidgets.QMainWindow):
         # into one repaint.
         self._param_rebake_timer.start()
 
-    def _on_layout_changed(self, index):
-        # Picking a layout (PO4): one undo step, the size rows
-        # rebuild for the new layout. The rebuild is deferred a
-        # turn: the layout combo lives inside _param_rows, so a
-        # rebuild here would delete the combo mid-signal (see
-        # _sync_param_rows). A brick pick re-bakes on the next
-        # paint through the texture cache key — no debounce
-        # needed for a discrete pick — and a shader layout
-        # applies through the uniforms at once.
+    def _apply_layout(self, name):
+        """Pick a layout (PO4) from the wheel's Layout page: one
+        undo step, the wheel's pages rebuild for the new layout
+        at once — the wheel's slices are data, not widgets, so
+        there is no sender to delete mid-signal (the old combo
+        needed a deferred rebuild). A brick pick re-bakes on the
+        next paint through the texture cache key — no debounce
+        needed for a discrete pick — and a shader layout applies
+        through the uniforms at once."""
         if self._refreshing:
             return
         obj = find_object(self.scene, self.selected_id) if self.selected_id else None
-        if obj is None or self._layout_combo is None:
-            return
-        name = self._layout_combo.itemData(index)
-        if name is None:
+        if obj is None:
             return
         mat = obj.setdefault("material", {})
         style = resolve_material_style(mat)
@@ -2762,30 +3005,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._clear_material_preview()
             self._push_undo()
             mat["layout"] = name
+            self._refresh_inspector()
             self._viewport.update()
-            QtCore.QTimer.singleShot(0, self._sync_layout_rows_now)
-
-    def _sync_layout_rows_now(self):
-        # The deferred half of _on_layout_changed: rebuild the
-        # rows for whatever is selected now (the selection may
-        # have moved since the pick).
-        obj = find_object(self.scene, self.selected_id) \
-            if self.selected_id else None
-        self._sync_param_rows(obj.get("material", {}) if obj else {})
-
-    def _on_layout_highlighted(self, index):
-        # Hovering a layout previews it on the selected object
-        # (UI12, entry 017): see it before you commit. The
-        # previewed layout shows with the stored sizes — the
-        # sizes are shared across layouts, so there is nothing
-        # to pin. Restoring returns the stored layout.
-        if self._refreshing or self._layout_combo is None:
-            return
-        name = self._layout_combo.itemData(index)
-        if name is None:
-            self._clear_material_preview()
-            return
-        self._preview_material({"layout": name})
 
     def _on_layout_size_changed(self, row, value):
         # A layout size edit (PO4, live-edit pattern, like the
@@ -2887,11 +3108,20 @@ class MainWindow(QtWidgets.QMainWindow):
         if obj is None:
             return
         current = QtGui.QColor(obj.get("material", {}).get("base_color", "#b0b0b0"))
-        color = QtWidgets.QColorDialog.getColor(current, self, "Base color")
+        # The dialog is its own window: clicks on it must not
+        # count as clicks outside the wheel.
+        if self._wheel is not None:
+            self._wheel.suspend_outside_close(True)
+        try:
+            color = QtWidgets.QColorDialog.getColor(
+                current, self, "Base color")
+        finally:
+            if self._wheel is not None:
+                self._wheel.suspend_outside_close(False)
         if color.isValid():
             self._push_undo()
             obj.setdefault("material", {})["base_color"] = color.name()
-            self._color_swatch.setStyleSheet(f"background: {color.name()};")
+            self._refresh_inspector()
             self._viewport.update()
 
     # -- cameras ---------------------------------------------------------------

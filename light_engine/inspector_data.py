@@ -30,8 +30,12 @@ FIELD_HELP = {
                  "or plastic, high is steel.",
     "texture": "A pattern on the surface. None leaves the plain color.",
     "smooth": "Smooths the edges between faces. Off shows each flat face.",
-    "material_preset": "A starting point. Picking one fills the three "
-                       "numbers below.",
+    "material_preset": "A starting point. Picking one fills the "
+                       "density, friction and bounce numbers.",
+    # The wheel's Depth page (R2): the quality mode.
+    "quality": "How sharp the picture is, against how fast it runs. "
+               "Draft is fastest, Final is sharpest, Auto lets "
+               "Reblend choose.",
     "material_look": "Also change the roughness and metalness to match "
                      "the preset.",
     "material_advanced": "Show every setting for this material. Off "

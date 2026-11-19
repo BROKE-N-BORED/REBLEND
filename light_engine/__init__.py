@@ -9,4 +9,4 @@ Standard library + PySide6 only. No web tech, no path tracing.
 # version here would offer the app its own release forever.
 # Each task bumps it to its own release tag; F3 keeps it
 # single-source.
-__version__ = "0.2-upd"
+__version__ = "0.2-r2"

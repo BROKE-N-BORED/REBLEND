@@ -36,19 +36,27 @@ given, the example tabletop scene opens.
   undo step, however far it moves. Exported frames never
   include the gizmo.
 - Add panel: add a primitive or an emitter (fire preset by default).
-  Inspector: collapsible sections (Object, Transform, Material) with
-  a plain-words line under every field; the Transform rows carry X/Y/Z
-  axis labels and the texture dropdown groups 20 procedural styles
-  by family (wood, stone and marble, brick and concrete, metal,
-  fabric and leather, ground), each named in plain words. Each
-  style shows its own knobs under the dropdown — ring spacing and
-  grain strength for wood, brick length and mortar width for
-  brick, vein spacing for marble — and a knob change re-renders
-  live (the texture re-bakes once, a short pause after the last
-  change, so a drag stays responsive). By default only the knobs
-  that change the look most show; "Show all settings" reveals
-  every knob for the style, and switching back never loses a
-  value. Emitter
+  Inspector: collapsible sections (Object, Transform, Physics) with
+  a plain-words line under every field, plus a one-line material
+  summary (style swatch + name) and an Edit material button; the
+  Transform rows carry X/Y/Z axis labels. Materials live on the
+  wheel (Q): a large panel docked bottom-centre over the viewport,
+  with 10 category pages on the inner ring (Material, Style,
+  Layout, Detail, Form, Surface, Life, Colour, Depth, Saved) and
+  the page's content on the outer ring — the Style page holds all
+  20 procedural styles at once (wood, stone and marble, brick and
+  concrete, metal, fabric and leather, ground), each named in
+  plain words. Each style shows its own knobs on the Detail page
+  — ring spacing and grain strength for wood, brick length and
+  mortar width for brick, vein spacing for marble — and a knob
+  change re-renders live (the texture re-bakes once, a short
+  pause after the last change, so a drag stays responsive). The
+  centre dial shows the last-touched parameter and keeps it
+  across page switches. By default only the knobs that change
+  the look most show; "Show all settings" on the Material page
+  reveals every knob for the style, and switching back never
+  loses a value. The Depth page carries the quality toggles
+  (Draft / Balanced / Final / Auto). Emitter
   objects get an Emitter section
   with the preset and key facts, plus an Edit emitter button that
   opens the dedicated editor window (double-clicking an emitter in
@@ -177,8 +185,10 @@ and the rest run.
 too big under load (a Qt test process grows about 50 MB per test and
 gets killed), so each group runs in its own process and the script
 fails if any group fails. The groups are A2/B2 (headless) and A1/C1/C2/
-C3/D1/D2/C6/C7/C8/C9/C10/C11/C12/C13/C14/C15/C16/C17/C18/C19/C20/C21/C22/C23/C24/C25/C26/C27/C28/C29 (Qt, only with `LIGHT_ENGINE_QT_TESTS=1`); the drag
-tests run as two method lists (D1/D2) for the same reason. CI runs the
+C3/D1/D2/C6/C7/C8/C9/C10/C11/C12/C13/C14/C15/C16/C17/C18/C19/C20/C21/C22/C23/C24/C26/C27/C28/C29/C30 (Qt, only with `LIGHT_ENGINE_QT_TESTS=1`); the drag
+tests run as two method lists (D1/D2) for the same reason. C25
+(QtPieMenu) was retired in R2 — the wheel replaces the pie menu.
+CI runs the
 headless suite on every push (`.github/workflows/ci.yml`).
 
 ## What v0.1 does not do yet

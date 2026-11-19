@@ -106,11 +106,15 @@ if [ "$LIGHT_ENGINE_QT_TESTS" = "1" ]; then
   run "C22 QtMaterialSimpleAdvanced" test_light_engine.QtMaterialSimpleAdvancedTests
   run "C23 QtMaterialLayout" test_light_engine.QtMaterialLayoutTests
   run "C24 QtMaterialWear" test_light_engine.QtMaterialWearTests
-  run "C25 QtPieMenu" test_light_engine.QtPieMenuTests
+  # C25 QtPieMenu was retired in R2: the wheel replaces the pie
+  # menu, and its behaviours live on in C30 where they have a
+  # wheel equivalent. The slot stays vacant; later groups are
+  # not renumbered.
   run "C26 QtFireGhost" test_light_engine.QtFireGhostRegressionTests
   run "C27 QtFColor" test_light_engine.QtFColorTests
   run "C28 QtDial" test_light_engine.QtDialTests
   run "C29 QtUpdater" test_light_engine.QtUpdaterTests
+  run "C30 QtWheel" test_light_engine.QtWheelTests
 fi
 if [ "$fail" = "0" ]; then
   echo "All groups passed."

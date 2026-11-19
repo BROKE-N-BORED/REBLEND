@@ -34,8 +34,11 @@ a comfortable default. No animation of any kind: the arc moves
 with the pointer, which is the dial's job.
 
 Signals: valueChanged(float) on every change (drag moves emit
-live, so a host can re-render as the hand moves). The plain
-getter is value().
+live, so a host can re-render as the hand moves), and
+editingFinished() when a gesture ends — drag release, Esc-cancel,
+a wheel notch, an arrow step, or the type-in editor closing
+(R2: the wheel commits one undo step per gesture on it). The
+plain getter is value().
 """
 
 from __future__ import annotations
@@ -66,6 +69,7 @@ class Dial(QtWidgets.QWidget):
     """
 
     valueChanged = QtCore.Signal(float)
+    editingFinished = QtCore.Signal()
 
     def __init__(self, minimum=0.0, maximum=100.0, step=1.0, value=None,
                  unit="", decimals=None, parent=None):
@@ -307,7 +311,10 @@ class Dial(QtWidgets.QWidget):
             self._press_value = None
             self._dragging = False
             event.accept()
-            if not was_drag:
+            if was_drag:
+                # The gesture ended: the host commits its undo step.
+                self.editingFinished.emit()
+            else:
                 # A plain click: type the value directly.
                 self._open_editor()
             return
@@ -329,6 +336,8 @@ class Dial(QtWidgets.QWidget):
         steps = event.angleDelta().y() / 120.0
         if steps:
             self.setValue(self._value + steps * self._step)
+            # One notch is one gesture: the host commits.
+            self.editingFinished.emit()
             event.accept()
             return
         super().wheelEvent(event)
@@ -339,9 +348,11 @@ class Dial(QtWidgets.QWidget):
         key = event.key()
         if key in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Right):
             self.setValue(self._value + self._step)
+            self.editingFinished.emit()
             event.accept()
         elif key in (QtCore.Qt.Key_Down, QtCore.Qt.Key_Left):
             self.setValue(self._value - self._step)
+            self.editingFinished.emit()
             event.accept()
         elif key == QtCore.Qt.Key_Escape and self._dragging:
             # Cancel the drag: the value goes back to the press
@@ -351,6 +362,7 @@ class Dial(QtWidgets.QWidget):
             self._dragging = False
             self._press_pos = None
             self._press_value = None
+            self.editingFinished.emit()
             event.accept()
         else:
             # Esc at rest is not ours — a parent (the wheel, a
@@ -415,6 +427,9 @@ class Dial(QtWidgets.QWidget):
         self._edit_cancelled = False
         self.setFocus(QtCore.Qt.OtherFocusReason)
         self.update()
+        # The edit ended (committed or cancelled): the gesture is
+        # over, so the host commits its undo step.
+        self.editingFinished.emit()
 
     def eventFilter(self, watched, event):
         if watched is self._editor:
@@ -429,8 +444,13 @@ class Dial(QtWidgets.QWidget):
             if event.type() == QtCore.QEvent.FocusOut:
                 # Clicking away commits, like Return does — but
                 # an invalid value is abandoned, not kept open:
-                # the user has already moved on.
-                if self._commit_editor(keep_open_on_invalid=False):
-                    self._edit_cancelled = False
-                    self.update()
+                # the user has already moved on. Only a visible
+                # editor is a real edit: the focus-out that
+                # follows _close_editor's hide must not emit a
+                # second editingFinished.
+                if self._editor is not None and self._editor.isVisible():
+                    if self._commit_editor(keep_open_on_invalid=False):
+                        self._edit_cancelled = False
+                        self.update()
+                        self.editingFinished.emit()
         return super().eventFilter(watched, event)

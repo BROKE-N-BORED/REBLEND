@@ -2319,11 +2319,39 @@ class QtViewportTests(unittest.TestCase):
         self.assertIsNone(vp._vbos["floor"][2])
         window.close()
 
+    def _pump(self, rounds=10):
+        from PySide6 import QtCore, QtWidgets
+        for _ in range(rounds):
+            QtWidgets.QApplication.processEvents()
+            QtCore.QThread.msleep(50)
+
+    def _open_wheel(self, window):
+        window._open_wheel()
+        self._pump()
+        return window._wheel
+
+    def _click_slice(self, window, page, key):
+        from PySide6 import QtCore, QtTest
+        wheel = window._wheel
+        wheel.set_page(page)
+        window._sync_wheel()
+        self._pump()
+        slices = window._wheel_slices(page)
+        index = next(i for i, s in enumerate(slices) if s.key == key)
+        QtTest.QTest.mouseClick(
+            wheel.canvas, QtCore.Qt.LeftButton,
+            pos=wheel.canvas.slice_point("outer", index))
+        self._pump()
+
+    def _smooth_slice(self, window):
+        return next(s for s in window._wheel_slices("material")
+                    if s.key == "smooth")
+
     def test_smooth_object_renders_and_toggle_rebuilds(self):
         """T3: smooth objects (sphere/cylinder) draw through the
         indexed path, flat ones (plane/box) through the soup, and
-        toggling the inspector checkbox rebuilds the buffers —
-        undoable in one step."""
+        toggling the wheel's Smooth shading slice rebuilds the
+        buffers — undoable in one step."""
         from PySide6 import QtCore, QtWidgets
         scene = scene_mod.load_scene(str(EXAMPLE))
         window = self.MainWindow(scene=scene)
@@ -2341,10 +2369,11 @@ class QtViewportTests(unittest.TestCase):
         self.assertFalse(vp._vbos["floor"][4])
         self.assertIsNone(vp._vbos["floor"][2])
         self.assertFalse(vp._vbos["tabletop"][4])
-        # Toggle smooth off through the inspector checkbox.
+        # Toggle smooth off through the wheel's slice.
         window._select("loaf")
-        self.assertTrue(window._smooth_check.isChecked())
-        window._smooth_check.setChecked(False)
+        self._open_wheel(window)
+        self.assertTrue(self._smooth_slice(window).checked)
+        self._click_slice(window, "material", "smooth")
         loaf = scene_mod.find_object(window.scene, "loaf")
         self.assertFalse(loaf["smooth_shading"])
         for _ in range(10):
@@ -2359,7 +2388,7 @@ class QtViewportTests(unittest.TestCase):
             QtCore.QThread.msleep(50)
         loaf = scene_mod.find_object(window.scene, "loaf")
         self.assertTrue(loaf["smooth_shading"])
-        self.assertTrue(window._smooth_check.isChecked())
+        self.assertTrue(self._smooth_slice(window).checked)
         self.assertTrue(vp._vbos["loaf"][4])
         image = vp.grabFramebuffer()
         self.assertFalse(image.isNull())
@@ -2701,15 +2730,27 @@ class QtMeshTests(unittest.TestCase):
                            "shadow off")
         window.close()
 
-    def test_smooth_checkbox_disabled_for_mesh(self):
-        """Meshes use the asset's stored normals as-is, so the Smooth
-        shading checkbox is disabled for them (T7 decision) — but
-        still works for a primitive next to the mesh."""
+    def _open_wheel(self, window):
+        window._open_wheel()
+        self._pump()
+        return window._wheel
+
+    def _smooth_slice(self, window):
+        return next(s for s in window._wheel_slices("material")
+                    if s.key == "smooth")
+
+    def test_smooth_slice_disabled_for_mesh(self):
+        """Meshes use the asset's stored normals as-is, so the
+        Smooth shading slice is disabled for them (T7 decision)
+        — but still works for a primitive next to the mesh."""
         window = self._show_demo()
+        self._open_wheel(window)
         window._select("gem")
-        self.assertFalse(window._smooth_check.isEnabled())
+        self._pump()
+        self.assertFalse(self._smooth_slice(window).enabled)
         window._select("crate")
-        self.assertTrue(window._smooth_check.isEnabled())
+        self._pump()
+        self.assertTrue(self._smooth_slice(window).enabled)
         window.close()
 
     def test_missing_mesh_file_warns_and_skips(self):
@@ -7702,7 +7743,7 @@ class InspectorTextTests(unittest.TestCase):
         from light_engine import inspector_data as inspector_mod
         expected = {"name", "position", "rotation", "scale", "color",
                     "roughness", "metalness", "texture", "smooth",
-                    "material_preset", "material_look",
+                    "material_preset", "material_look", "quality",
                     "material_advanced", "density",
                     "friction", "restitution",
                     "cast_shadow", "receive_shadow", "emitter",
@@ -7854,17 +7895,59 @@ class QtInspectorTests(unittest.TestCase):
         scene["objects"].append(emitter)
         return scene, emitter
 
+    def _open_wheel(self, window):
+        window._open_wheel()
+        self._pump()
+        return window._wheel
+
+    def _click_slice(self, window, page, key):
+        from PySide6 import QtCore, QtTest
+        wheel = window._wheel
+        wheel.set_page(page)
+        window._sync_wheel()
+        self._pump()
+        slices = window._wheel_slices(page)
+        index = next(i for i, s in enumerate(slices) if s.key == key)
+        QtTest.QTest.mouseClick(
+            wheel.canvas, QtCore.Qt.LeftButton,
+            pos=wheel.canvas.slice_point("outer", index))
+        self._pump()
+
+    def _hover_help(self, window, page, key, text):
+        """Hover a wheel slice for real and wait for the help
+        line to show the slice's plain-words text."""
+        from PySide6 import QtTest
+        wheel = window._wheel
+        wheel.set_page(page)
+        window._sync_wheel()
+        self._pump(rounds=2)
+        slices = window._wheel_slices(page)
+        index = next(i for i, s in enumerate(slices) if s.key == key)
+        point = wheel.canvas.slice_point("outer", index)
+        QtTest.QTest.mouseMove(wheel.canvas,
+                               wheel.canvas.rect().center())
+        self._pump(rounds=2)
+        for _ in range(10):
+            QtTest.QTest.mouseMove(wheel.canvas, point)
+            self._pump(rounds=2)
+            if wheel._help.text() == text:
+                return
+        self.fail("help line never showed %r (saw %r)"
+                  % (text, wheel._help.text()))
+
     def test_sections_exist_and_start_expanded(self):
         scene = scene_mod.load_scene(str(EXAMPLE))
         window = self.MainWindow(scene=scene)
         self._show(window)
         window._select("mug")
+        # R2: the Material section is gone — the wheel is the
+        # material editor now.
         self.assertEqual(set(window._sections),
-                         {"object", "transform", "material", "emitter",
+                         {"object", "transform", "emitter",
                           "physics"})
         for name, section in window._sections.items():
             self.assertTrue(section.is_expanded(), name)
-        for name in ("object", "transform", "material"):
+        for name in ("object", "transform"):
             self.assertTrue(window._sections[name].isVisible(), name)
         window.close()
 
@@ -7891,7 +7974,9 @@ class QtInspectorTests(unittest.TestCase):
         scene = scene_mod.load_scene(str(EXAMPLE))
         window = self.MainWindow(scene=scene)
         self._show(window)
-        section = window._sections["material"]
+        # R2: the Material section is gone — transform is the
+        # stand-in for the animated-collapse shape.
+        section = window._sections["transform"]
         self.assertEqual(section._anim.duration(), 250)
         self.assertEqual(section._anim.easingCurve().type(),
                          QtCore.QEasingCurve.OutBack)
@@ -7926,76 +8011,119 @@ class QtInspectorTests(unittest.TestCase):
         window = self.MainWindow(scene=scene)
         self._show(window)
         window._select("mug")
+        # The inspector fields that remain (object + transform)
+        # still carry their help labels.
+        wheel_keys = {"color", "roughness", "metalness", "texture",
+                      "smooth", "material_preset", "material_look",
+                      "material_advanced", "density", "friction",
+                      "restitution", "quality"}
         labels = {lbl.text(): lbl for lbl in
                   window.findChildren(QtWidgets.QLabel)}
         for key, text in self.window_mod.FIELD_HELP.items():
             if key == "emitter":
                 continue
+            if key in wheel_keys:
+                # R2: the material help lines live on the wheel
+                # now — the help line under the search box, shown
+                # while hovering the slice. Checked below.
+                continue
             if key.startswith("param_"):
                 # PO2: the param help lines are contextual — a
-                # style's knobs (and their help labels) only exist
+                # style's knobs (and their help) only exist
                 # while that style is picked, and the mug wears
                 # no style. They are checked per style below.
                 continue
             if key == "layout" or key.startswith("layout_"):
-                # PO4: the layout help lines are contextual — the
-                # picker (and its help label) only exists in
-                # Advanced for a style with a choice, and the size
-                # rows only for the layout actually picked. They
-                # are checked per style below.
+                # PO4: the layout help lines are contextual —
+                # the size knobs only exist in Advanced for the
+                # layout actually picked. Checked per style below.
                 continue
             if key.startswith("wear_"):
                 # PO5: the wear help lines are contextual — the
-                # Life rows only exist in Advanced, per style.
-                # They are checked per style below.
+                # Life knobs only exist in Advanced, per style.
+                # Checked per style below.
                 continue
             self.assertIn(text, labels, key)
             self.assertTrue(labels[text].isVisible(), key)
+        # R2: every wheel slice explains itself on hover. One
+        # real hover per fixed page proves the help-line wiring;
+        # the per-style loop below checks every contextual slice
+        # carries the right help key (the hover path itself is
+        # proven for knobs by C21's Detail test).
+        wheel = self._open_wheel(window)
+        help_of = self.window_mod.FIELD_HELP
+        self._hover_help(window, "material", "roughness",
+                         help_of["roughness"])
+        self._hover_help(window, "style", "wood_cathedral",
+                         help_of["texture"])
+        self._hover_help(window, "form", "oak_wood",
+                         help_of["material_preset"])
+        self._hover_help(window, "surface", "density",
+                         help_of["density"])
+        self._hover_help(window, "colour", "#ffffff",
+                         help_of["color"])
+        self._hover_help(window, "depth", "draft",
+                         help_of["quality"])
+        # The fixed-page slices not hovered above still carry
+        # their help keys.
+        for page, key, want in (
+                ("material", "metalness", "metalness"),
+                ("material", "smooth", "smooth"),
+                ("material", "advanced", "material_advanced"),
+                ("form", "look", "material_look"),
+                ("surface", "friction", "friction"),
+                ("surface", "restitution", "restitution")):
+            slice_ = next(s for s in window._wheel_slices(page)
+                          if s.key == key)
+            self.assertEqual(slice_.help_key, want, (page, key))
+            self.assertTrue(help_of[want], want)
         # PO2: every style's knobs explain themselves while shown.
         # PO3: Advanced shows every knob, so the toggle goes on
         # first — in Simple the Advanced-only knobs (wobble,
-        # wander, variation) have no rows to explain.
-        window._material_advanced_check.setChecked(True)
-        self._pump(2)
-        combo = window._texture_combo
+        # wander, variation) have no slices to explain.
+        self._click_slice(window, "material", "advanced")
         for style, knobs in inspector_mod.PARAM_UI.items():
-            combo.setCurrentIndex(combo.findData(style))
+            # The apply path (the click path is proven in
+            # C18–C24); the style pick is one undo step.
+            window._apply_style(style)
             self._pump(2)
-            labels = {lbl.text(): lbl for lbl in
-                      window.findChildren(QtWidgets.QLabel)}
             for knob in knobs:
-                text = inspector_mod.FIELD_HELP[knob["help"]]
-                self.assertIn(text, labels, knob["help"])
-                self.assertTrue(labels[text].isVisible(), knob["help"])
-            # PO4: the layout rows explain themselves while shown.
-            # The picker shows only for styles with a choice, and
-            # the size rows only for the layout actually picked —
-            # so each layout is picked in turn.
+                slice_ = next(
+                    s for s in window._wheel_slices("detail")
+                    if s.key == knob["param"])
+                self.assertEqual(slice_.help_key, knob["help"],
+                                 knob["help"])
+                self.assertTrue(help_of[knob["help"]], knob["help"])
+            # PO4: the layout slices explain themselves while
+            # shown — the picks carry "layout", and each
+            # layout's size knobs carry their own help keys.
             layouts = textures_mod.layouts_for_style(style)
-            if len(layouts) > 1:
-                text = inspector_mod.FIELD_HELP["layout"]
-                self.assertIn(text, labels, "layout")
-                self.assertTrue(labels[text].isVisible(), "layout")
-                for layout in layouts:
-                    window._layout_combo.setCurrentIndex(
-                        window._layout_combo.findData(layout))
-                    self._pump(2)
-                    labels = {lbl.text(): lbl for lbl in
-                              window.findChildren(QtWidgets.QLabel)}
-                    for row in inspector_mod.LAYOUT_UI.get(layout, ()):
-                        text = inspector_mod.FIELD_HELP[row["help"]]
-                        self.assertIn(text, labels, row["help"])
-                        self.assertTrue(labels[text].isVisible(),
-                                        row["help"])
-            # PO5: the wear rows explain themselves while shown.
-            # Every style takes some wear, so the Life rows are
+            for layout in layouts:
+                window._apply_layout(layout)
+                self._pump(2)
+                picks = window._wheel_slices("layout")
+                self.assertTrue(
+                    all(s.help_key == "layout"
+                        for s in picks if s.kind == "pick"),
+                    "layout")
+                for row in inspector_mod.LAYOUT_UI.get(layout, ()):
+                    slice_ = next(
+                        s for s in picks
+                        if s.key == "size_" + row["key"])
+                    self.assertEqual(slice_.help_key, row["help"],
+                                     row["help"])
+                    self.assertTrue(help_of[row["help"]],
+                                    row["help"])
+            # PO5: the wear knobs explain themselves while shown.
+            # Every style takes some wear, so the Life knobs are
             # there in Advanced whatever the layout.
-            labels = {lbl.text(): lbl for lbl in
-                      window.findChildren(QtWidgets.QLabel)}
             for row in inspector_mod.wear_rows_for(style):
-                text = inspector_mod.FIELD_HELP[row["help"]]
-                self.assertIn(text, labels, row["help"])
-                self.assertTrue(labels[text].isVisible(), row["help"])
+                slice_ = next(
+                    s for s in window._wheel_slices("life")
+                    if s.key == row["key"])
+                self.assertEqual(slice_.help_key, row["help"],
+                                 row["help"])
+                self.assertTrue(help_of[row["help"]], row["help"])
         window._select(emitter["id"])
         labels = {lbl.text(): lbl for lbl in
                   window.findChildren(QtWidgets.QLabel)}
@@ -8005,59 +8133,58 @@ class QtInspectorTests(unittest.TestCase):
         window.close()
 
     def test_texture_display_names_map_to_internal_names(self):
-        # PO1: the combo groups the 20 styles by family — None
-        # first, then one disabled header row per family, then
-        # that family's styles. The display names never reach the
-        # scene; the style key is the item data.
+        # PO1 (R2: the wheel's Style page): the 20 styles in
+        # family order — None first, then each family's styles.
+        # No family headers on a ring; the display names never
+        # reach the scene; the style key is the slice key.
         scene = scene_mod.load_scene(str(EXAMPLE))
         window = self.MainWindow(scene=scene)
         self._show(window)
         window._select("mug")
-        combo = window._texture_combo
-        self.assertEqual([combo.itemText(i) for i in range(combo.count())],
+        self._open_wheel(window)
+        slices = window._wheel_slices("style")
+        self.assertEqual([s.label for s in slices],
                          ["None",
-                          "Wood", "Cathedral oak", "Knotty pine", "Burl",
+                          "Cathedral oak", "Knotty pine", "Burl",
                           "Weathered wood",
-                          "Stone and marble", "Granite", "Limestone",
+                          "Granite", "Limestone",
                           "Carrara marble", "Slate",
-                          "Brick and concrete", "Stretcher brick",
+                          "Stretcher brick",
                           "Raw concrete", "Aged concrete",
-                          "Metal", "Brushed metal", "Rusted metal",
+                          "Brushed metal", "Rusted metal",
                           "Galvanised metal",
-                          "Fabric and leather", "Canvas", "Wool loop",
+                          "Canvas", "Wool loop",
                           "Worn leather",
-                          "Ground", "Lawn", "Soil", "Sand"])
-        self.assertEqual([combo.itemData(i) for i in range(combo.count())],
+                          "Lawn", "Soil", "Sand"])
+        self.assertEqual([s.key for s in slices],
                          ["none",
-                          None, "wood_cathedral", "wood_knotty_pine",
+                          "wood_cathedral", "wood_knotty_pine",
                           "wood_burl", "wood_weathered",
-                          None, "stone_granite", "stone_limestone",
+                          "stone_granite", "stone_limestone",
                           "stone_marble_carrara", "stone_slate",
-                          None, "brick_stretcher", "concrete_raw",
+                          "brick_stretcher", "concrete_raw",
                           "concrete_aged",
-                          None, "metal_brushed", "metal_rusted",
+                          "metal_brushed", "metal_rusted",
                           "metal_galvanised",
-                          None, "fabric_canvas", "fabric_wool_loop",
+                          "fabric_canvas", "fabric_wool_loop",
                           "fabric_leather",
-                          None, "ground_lawn", "ground_soil",
+                          "ground_lawn", "ground_soil",
                           "ground_sand"])
-        # The header rows are disabled: not selectable, no data.
-        model = combo.model()
-        for header in (1, 6, 11, 15, 19, 23):
-            self.assertFalse(model.item(header).isEnabled())
         # Picking "Cathedral oak" writes the style key to the
         # material (style canonical, texture mirroring it); the
         # display name never reaches the scene.
-        combo.setCurrentIndex(combo.findData("wood_cathedral"))
-        self._pump()
+        self._click_slice(window, "style", "wood_cathedral")
         obj = scene_mod.find_object(scene, "mug")
         self.assertEqual(obj["material"]["style"], "wood_cathedral")
         self.assertEqual(obj["material"]["texture"], "wood_cathedral")
         obj["material"]["style"] = "metal_brushed"
         obj["material"]["texture"] = "metal_brushed"
         window._refresh_inspector()
-        self.assertEqual(combo.currentText(), "Brushed metal")
-        self.assertEqual(combo.currentData(), "metal_brushed")
+        checked = [s for s in window._wheel_slices("style")
+                   if s.checked]
+        self.assertEqual(len(checked), 1)
+        self.assertEqual(checked[0].label, "Brushed metal")
+        self.assertEqual(checked[0].key, "metal_brushed")
         window.close()
 
     def test_emitter_section_only_for_emitters(self):
@@ -10439,7 +10566,9 @@ class QtVisualIdentityTests(unittest.TestCase):
         scene = scene_mod.load_scene(str(EXAMPLE))
         window = self._make_window(scene=scene)
         self._show(window)
-        section = window._sections["material"]
+        # R2: the Material section is gone — transform is the
+        # stand-in for the reduced-motion jump shape.
+        section = window._sections["transform"]
         style_mod.set_reduced_motion_override(True)
         try:
             section.set_expanded(False)
@@ -11100,9 +11229,9 @@ class MaterialPhysicsTests(unittest.TestCase):
 
 @unittest.skipUnless(QT_TESTS, "Qt tests need LIGHT_ENGINE_QT_TESTS=1")
 class QtMaterialPhysicsTests(unittest.TestCase):
-    """T19: the Material section's preset picker — picks fill the
-    numbers, hand-edits flip to custom, "also set look" is the only
-    way a pick touches the look."""
+    """T19 (R2: the wheel's Form + Surface pages) — preset picks
+    fill the numbers, hand-edits flip to custom, "also set look"
+    is the only way a pick touches the look."""
 
     @classmethod
     def setUpClass(cls):
@@ -11131,9 +11260,39 @@ class QtMaterialPhysicsTests(unittest.TestCase):
         window._select("mug")
         return window
 
-    def _pick(self, window, name):
-        combo = window._material_preset_combo
-        combo.setCurrentIndex(combo.findData(name))
+    def _open_wheel(self, window):
+        window._open_wheel()
+        self._pump()
+        return window._wheel
+
+    def _click_slice(self, window, page, key):
+        # A real click on the wheel's outer ring: find the slice's
+        # index, click its centre point on the canvas.
+        from PySide6 import QtCore, QtTest
+        wheel = window._wheel
+        wheel.set_page(page)
+        window._sync_wheel()
+        self._pump()
+        slices = window._wheel_slices(page)
+        index = next(i for i, s in enumerate(slices)
+                     if s.key == key)
+        QtTest.QTest.mouseClick(
+            wheel.canvas, QtCore.Qt.LeftButton,
+            pos=wheel.canvas.slice_point("outer", index))
+        self._pump()
+
+    def _checked_preset(self, window):
+        for slice_ in window._wheel_slices("form"):
+            if slice_.checked:
+                return slice_.key
+        return None
+
+    def _dial_set(self, window, value):
+        # A dial gesture: move to the value, then release (the
+        # release commits the one undo step).
+        dial = window._wheel.dial
+        dial.setValue(value)
+        dial.editingFinished.emit()
         self._pump()
 
     def _material(self, window):
@@ -11141,11 +11300,12 @@ class QtMaterialPhysicsTests(unittest.TestCase):
 
     def test_preset_pick_sets_the_numbers(self):
         window = self._open_tavern_mug()
-        self._pick(window, "steel")
+        self._open_wheel(window)
+        self._click_slice(window, "form", "steel")
         mat = self._material(window)
         self.assertEqual((mat["density"], mat["friction"],
                           mat["restitution"]), (7.8, 0.3, 0.6))
-        self._pick(window, "rubber")
+        self._click_slice(window, "form", "rubber")
         mat = self._material(window)
         self.assertEqual((mat["density"], mat["friction"],
                           mat["restitution"]), (1.1, 0.9, 0.8))
@@ -11153,7 +11313,8 @@ class QtMaterialPhysicsTests(unittest.TestCase):
 
     def test_preset_pick_is_one_undo_step(self):
         window = self._open_tavern_mug()
-        self._pick(window, "steel")
+        self._open_wheel(window)
+        self._click_slice(window, "form", "steel")
         window.undo()
         mat = self._material(window)
         self.assertEqual((mat["density"], mat["friction"],
@@ -11166,19 +11327,24 @@ class QtMaterialPhysicsTests(unittest.TestCase):
 
     def test_hand_edit_flips_picker_to_custom(self):
         window = self._open_tavern_mug()
-        self._pick(window, "steel")
-        combo = window._material_preset_combo
-        self.assertEqual(combo.currentData(), "steel")
-        window._material_spins["density"].setValue(5.0)
-        self._pump()
-        self.assertEqual(combo.currentData(), "custom")
+        self._open_wheel(window)
+        self._click_slice(window, "form", "steel")
+        self.assertEqual(self._checked_preset(window), "steel")
+        # Hand-edit the density on the Surface page, through the
+        # centre dial: load the knob, then turn it.
+        self._click_slice(window, "surface", "density")
+        self.assertEqual(window._wheel.dial_label(), "Density")
+        self._dial_set(window, 5.0)
+        self.assertEqual(self._checked_preset(window), "custom")
         self.assertEqual(self._material(window)["density"], 5.0)
         window.close()
 
     def test_look_tick_on_sets_the_look(self):
         window = self._open_tavern_mug()
-        window._material_look_check.setChecked(True)
-        self._pick(window, "steel")
+        self._open_wheel(window)
+        self._click_slice(window, "form", "look")
+        self.assertTrue(window._material_look)
+        self._click_slice(window, "form", "steel")
         mat = self._material(window)
         self.assertEqual(mat["roughness"], 0.3)
         self.assertEqual(mat["metalness"], 1.0)
@@ -11186,10 +11352,13 @@ class QtMaterialPhysicsTests(unittest.TestCase):
 
     def test_look_tick_off_leaves_the_look(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         before = (self._material(window)["roughness"],
                   self._material(window)["metalness"])
-        self.assertFalse(window._material_look_check.isChecked())
-        self._pick(window, "steel")
+        look = next(s for s in window._wheel_slices("form")
+                    if s.key == "look")
+        self.assertFalse(look.checked)
+        self._click_slice(window, "form", "steel")
         mat = self._material(window)
         self.assertEqual((mat["roughness"], mat["metalness"]), before)
         window.close()
@@ -11202,43 +11371,51 @@ class QtMaterialPhysicsTests(unittest.TestCase):
         window = self.MainWindow(scene=scene)
         self._show(window)
         window._select("mug")
-        self.assertEqual(
-            window._material_preset_combo.currentData(), "rubber")
+        self._open_wheel(window)
+        self.assertEqual(self._checked_preset(window), "rubber")
         window.close()
 
     def test_controls_disabled_with_no_selection(self):
         scene = scene_mod.load_scene(str(EXAMPLE))
         window = self.MainWindow(scene=scene)
         self._show(window)
-        # Nothing selected yet: the whole Material section is dead.
-        self.assertFalse(window._material_preset_combo.isEnabled())
-        self.assertFalse(window._material_look_check.isEnabled())
-        for spin in window._material_spins.values():
-            self.assertFalse(spin.isEnabled())
+        # Nothing selected yet: the wheel's material slices are
+        # dead — but the Depth page (app state, not material)
+        # stays live.
+        self._open_wheel(window)
+        for page in ("material", "style", "form", "surface"):
+            for slice_ in window._wheel_slices(page):
+                self.assertFalse(slice_.enabled,
+                                 f"{page}/{slice_.key} enabled")
+        for slice_ in window._wheel_slices("depth"):
+            self.assertTrue(slice_.enabled)
         window._select("mug")
-        self.assertTrue(window._material_preset_combo.isEnabled())
+        self._pump()
+        for slice_ in window._wheel_slices("form"):
+            self.assertTrue(slice_.enabled)
         window.close()
 
     def test_custom_pick_keeps_values(self):
         window = self._open_tavern_mug()
-        self._pick(window, "steel")
-        self._pick(window, "custom")
+        self._open_wheel(window)
+        self._click_slice(window, "form", "steel")
+        self._click_slice(window, "form", "custom")
         mat = self._material(window)
         self.assertEqual((mat["density"], mat["friction"],
                           mat["restitution"]), (7.8, 0.3, 0.6))
-        # The name is never stored, so the picker re-derives steel
+        # The name is never stored, so the wheel re-derives steel
         # from the numbers at once.
-        self.assertEqual(
-            window._material_preset_combo.currentData(), "steel")
+        self.assertEqual(self._checked_preset(window), "steel")
         window.close()
 
 
 @unittest.skipUnless(QT_TESTS, "Qt tests need LIGHT_ENGINE_QT_TESTS=1")
 class QtMaterialPreviewTests(unittest.TestCase):
-    """UI12: hovering a material preset or a texture previews it
-    on the selected object — click applies, leaving restores,
-    and a preview pushes no undo step. The preview lives only
-    in the viewport; the scene is untouched until a click."""
+    """UI12 (R2: the wheel's rings) — hovering a preset or a
+    style previews it on the selected object: click applies,
+    leaving restores, and a preview pushes no undo step. The
+    preview lives only in the viewport; the scene is untouched
+    until a click."""
 
     @classmethod
     def setUpClass(cls):
@@ -11270,57 +11447,62 @@ class QtMaterialPreviewTests(unittest.TestCase):
     def _material(self, window):
         return scene_mod.find_object(window.scene, "mug")["material"]
 
-    def _hover(self, window, combo, name, expect):
-        """Hover a popup item for real and wait for the preview
+    def _open_wheel(self, window):
+        window._open_wheel()
+        self._pump()
+        return window._wheel
+
+    def _hover(self, window, page, key, expect):
+        """Hover a wheel slice for real and wait for the preview
         to land: one mouseMove can land late under load, so
         re-move until the viewport shows the expected preview
-        (up to ~2 s). The popup opens here; the caller closes
-        it (hidePopup) when the hover is done. When the hover
-        never lands, the caller's assertion reports the miss
-        with the real state."""
+        (up to ~2 s). When the hover never lands, the caller's
+        assertion reports the miss with the real state."""
         from PySide6 import QtTest
-        combo.showPopup()
-        self._pump(rounds=4)
-        view = combo.view()
-        index = combo.findData(name)
-        rect = view.visualRect(view.model().index(index, 0))
-        # Move the pointer off the target first, to another row
-        # of the SAME popup: QTest.mouseMove is a no-op when the
-        # pointer is already at the target, and the popup view
-        # keeps its hover row across hide/show, so a previous
-        # hover can leave the pointer sitting on this item with
-        # the view believing it never left — no highlight fires
-        # (probed: a reused view's second hover on the same row
-        # never lands). A move to a different row breaks the
-        # stale hover either way: if the stale row is the target,
-        # the neutral move clears it; if it is the neutral row,
-        # the target move still lands. Moving outside the popup
-        # does NOT work — the popup's mouse grab swallows it.
-        neutral = 0 if index != 0 else 1
-        neutral_rect = view.visualRect(
-            view.model().index(neutral, 0))
-        QtTest.QTest.mouseMove(view.viewport(), neutral_rect.center())
+        wheel = window._wheel
+        wheel.set_page(page)
+        window._sync_wheel()
+        self._pump(rounds=2)
+        slices = window._wheel_slices(page)
+        index = next(i for i, s in enumerate(slices) if s.key == key)
+        point = wheel.canvas.slice_point("outer", index)
+        # Move the pointer off the target first: QTest.mouseMove
+        # is a no-op when the pointer is already at the target,
+        # and the canvas keeps its hover across page switches,
+        # so a previous hover can leave the pointer sitting on
+        # this slice with the canvas believing it never left —
+        # no hover fires. The centre dial is the neutral spot:
+        # moving onto it clears the ring hover.
+        QtTest.QTest.mouseMove(wheel.canvas,
+                               wheel.canvas.rect().center())
         self._pump(rounds=2)
         for _ in range(10):
-            QtTest.QTest.mouseMove(view.viewport(), rect.center())
+            QtTest.QTest.mouseMove(wheel.canvas, point)
             self._pump(rounds=2)
             if window._viewport._material_preview == expect:
                 return
 
-    def _click_popup_item(self, window, combo, name):
-        """Click a popup item for real, after _hover has it
-        highlighted: press + release on the item, like a user
-        picking it. The popup closes itself on the click."""
+    def _click_slice(self, window, page, key):
+        """Click a wheel slice for real, after _hover has it
+        hovered: press + release on the slice, like a user
+        picking it."""
         from PySide6 import QtCore, QtTest
-        view = combo.view()
-        index = combo.findData(name)
-        rect = view.visualRect(view.model().index(index, 0))
-        QtTest.QTest.mousePress(view.viewport(), QtCore.Qt.LeftButton,
-                                pos=rect.center())
-        self._pump(rounds=2)
-        QtTest.QTest.mouseRelease(view.viewport(), QtCore.Qt.LeftButton,
-                                  pos=rect.center())
+        wheel = window._wheel
+        wheel.set_page(page)
+        window._sync_wheel()
         self._pump()
+        slices = window._wheel_slices(page)
+        index = next(i for i, s in enumerate(slices) if s.key == key)
+        QtTest.QTest.mouseClick(
+            wheel.canvas, QtCore.Qt.LeftButton,
+            pos=wheel.canvas.slice_point("outer", index))
+        self._pump()
+
+    def _checked_preset(self, window):
+        for slice_ in window._wheel_slices("form"):
+            if slice_.checked:
+                return slice_.key
+        return None
 
     def _render_bytes(self, window, tmp):
         path = os.path.join(tmp, "frame.png")
@@ -11330,9 +11512,9 @@ class QtMaterialPreviewTests(unittest.TestCase):
 
     def test_hover_preset_previews_the_look_without_applying(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         before = dict(self._material(window))
-        combo = window._material_preset_combo
-        self._hover(window, combo, "steel",
+        self._hover(window, "form", "steel",
                     ("mug", {"roughness": 0.3, "metalness": 1.0}))
         self.assertEqual(window._viewport._material_preview,
                          ("mug", {"roughness": 0.3, "metalness": 1.0}))
@@ -11340,19 +11522,19 @@ class QtMaterialPreviewTests(unittest.TestCase):
         self.assertEqual(self._material(window), before)
         self.assertEqual(len(window._undo_stack), 0)
         self.assertFalse(window.isWindowModified())
-        combo.hidePopup()
+        window._close_wheel()
         window.close()
 
     def test_hover_changes_the_rendered_pixels(self):
         window = self._open_tavern_mug()
-        combo = window._material_preset_combo
+        self._open_wheel(window)
         with tempfile.TemporaryDirectory() as tmp:
             before = self._render_bytes(window, tmp)
-            self._hover(window, combo, "steel",
+            self._hover(window, "form", "steel",
                         ("mug", {"roughness": 0.3, "metalness": 1.0}))
             during = self._render_bytes(window, tmp)
             self.assertNotEqual(during, before)
-            combo.hidePopup()
+            window._close_wheel()
             self._pump(rounds=4)
             after = self._render_bytes(window, tmp)
             self.assertEqual(after, before)
@@ -11360,11 +11542,14 @@ class QtMaterialPreviewTests(unittest.TestCase):
 
     def test_leaving_restores_the_previous_material(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         before = dict(self._material(window))
-        combo = window._material_preset_combo
-        self._hover(window, combo, "steel",
+        self._hover(window, "form", "steel",
                     ("mug", {"roughness": 0.3, "metalness": 1.0}))
-        combo.hidePopup()
+        # Leaving the ring for the centre dial ends the preview.
+        from PySide6 import QtTest
+        QtTest.QTest.mouseMove(window._wheel.canvas,
+                               window._wheel.canvas.rect().center())
         self._pump(rounds=4)
         self.assertIsNone(window._viewport._material_preview)
         self.assertEqual(self._material(window), before)
@@ -11372,11 +11557,11 @@ class QtMaterialPreviewTests(unittest.TestCase):
 
     def test_click_applies_the_preset(self):
         window = self._open_tavern_mug()
-        combo = window._material_preset_combo
-        self._hover(window, combo, "steel",
+        self._open_wheel(window)
+        self._hover(window, "form", "steel",
                     ("mug", {"roughness": 0.3, "metalness": 1.0}))
-        self._click_popup_item(window, combo, "steel")
-        self.assertEqual(combo.currentData(), "steel")
+        self._click_slice(window, "form", "steel")
+        self.assertEqual(self._checked_preset(window), "steel")
         mat = self._material(window)
         self.assertEqual((mat["density"], mat["friction"],
                           mat["restitution"]), (7.8, 0.3, 0.6))
@@ -11390,10 +11575,10 @@ class QtMaterialPreviewTests(unittest.TestCase):
 
     def test_hover_texture_previews_and_restores(self):
         window = self._open_tavern_mug()
-        combo = window._texture_combo
+        self._open_wheel(window)
         with tempfile.TemporaryDirectory() as tmp:
             before = self._render_bytes(window, tmp)
-            self._hover(window, combo, "wood_cathedral",
+            self._hover(window, "style", "wood_cathedral",
                         ("mug", {"texture": "wood_cathedral",
                                  "style": "wood_cathedral",
                                  "params": {}, "wear": {}, "base_color": "#8a5a2b", "roughness": 0.7, "metalness": 0.0}))
@@ -11403,7 +11588,7 @@ class QtMaterialPreviewTests(unittest.TestCase):
                                       "params": {}, "wear": {}, "base_color": "#8a5a2b", "roughness": 0.7, "metalness": 0.0}))
             self.assertEqual(self._material(window)["texture"], "none")
             self.assertNotEqual(self._render_bytes(window, tmp), before)
-            combo.hidePopup()
+            window._close_wheel()
             self._pump(rounds=4)
             self.assertIsNone(window._viewport._material_preview)
             self.assertEqual(self._render_bytes(window, tmp), before)
@@ -11411,14 +11596,14 @@ class QtMaterialPreviewTests(unittest.TestCase):
 
     def test_preview_pushes_no_undo_step(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         before = dict(self._material(window))
-        combo = window._material_preset_combo
-        self._hover(window, combo, "steel",
+        self._hover(window, "form", "steel",
                     ("mug", {"roughness": 0.3, "metalness": 1.0}))
         # Browsing on to another preset switches the preview.
-        self._hover(window, combo, "rubber",
+        self._hover(window, "form", "rubber",
                     ("mug", {"roughness": 0.9, "metalness": 0.0}))
-        combo.hidePopup()
+        window._close_wheel()
         self._pump(rounds=4)
         self.assertIsNone(window._viewport._material_preview)
         self.assertEqual(self._material(window), before)
@@ -11430,57 +11615,57 @@ class QtMaterialPreviewTests(unittest.TestCase):
         scene = scene_mod.load_scene(str(EXAMPLE))
         window = self.MainWindow(scene=scene)
         self._show(window)
-        # Nothing selected: the highlight slots are dead ends —
+        # Nothing selected: the preview helpers are dead ends —
         # no preview, no crash.
-        combo = window._material_preset_combo
-        window._on_material_preset_highlighted(combo.findData("steel"))
+        window._preview_preset("steel")
         self.assertIsNone(window._viewport._material_preview)
-        window._on_texture_highlighted(
-            window._texture_combo.findData("wood_cathedral"))
+        window._preview_style("wood_cathedral")
         self.assertIsNone(window._viewport._material_preview)
         window.close()
 
     def test_hover_custom_clears_the_preview(self):
         window = self._open_tavern_mug()
-        combo = window._material_preset_combo
-        self._hover(window, combo, "steel",
+        self._open_wheel(window)
+        self._hover(window, "form", "steel",
                     ("mug", {"roughness": 0.3, "metalness": 1.0}))
         # Custom has no look: hovering it restores the object.
-        self._hover(window, combo, "custom", None)
+        self._hover(window, "form", "custom", None)
         self.assertIsNone(window._viewport._material_preview)
-        combo.hidePopup()
+        window._close_wheel()
         window.close()
 
-    def test_popup_close_clears_the_preview(self):
+    def test_wheel_close_clears_the_preview(self):
         window = self._open_tavern_mug()
-        combo = window._material_preset_combo
-        self._hover(window, combo, "steel",
+        self._open_wheel(window)
+        self._hover(window, "form", "steel",
                     ("mug", {"roughness": 0.3, "metalness": 1.0}))
-        # Esc closes the popup without picking — the Hide filter
-        # ends the preview, whichever way the popup closes.
+        # Esc closes the wheel without picking — closing ends
+        # the preview, whichever way the wheel closes.
         from PySide6 import QtCore, QtTest
-        QtTest.QTest.keyClick(combo.view(), QtCore.Qt.Key_Escape)
+        QtTest.QTest.keyClick(window._wheel.canvas,
+                              QtCore.Qt.Key_Escape)
         self._pump(rounds=4)
+        self.assertFalse(window._wheel.isVisible())
         self.assertIsNone(window._viewport._material_preview)
         window.close()
 
     def test_refresh_clears_the_preview(self):
         window = self._open_tavern_mug()
-        combo = window._material_preset_combo
-        self._hover(window, combo, "steel",
+        self._open_wheel(window)
+        self._hover(window, "form", "steel",
                     ("mug", {"roughness": 0.3, "metalness": 1.0}))
         # Any scene or selection change invalidates a preview.
         window._refresh_inspector()
         self.assertIsNone(window._viewport._material_preview)
-        combo.hidePopup()
+        window._close_wheel()
         window.close()
 
 
 @unittest.skipUnless(QT_TESTS, "Qt tests need LIGHT_ENGINE_QT_TESTS=1")
 class QtMaterialLibraryTests(unittest.TestCase):
-    """PO1: the grouped texture combo — families with disabled
-    headers, picks that write the style, hover-preview still
-    working on the grouped list, and styles rendering distinctly
+    """PO1 (R2: the wheel's Style page) — every style on one
+    ring, in family order, picks that write the style,
+    hover-preview still working, and styles rendering distinctly
     on the same object."""
 
     @classmethod
@@ -11513,51 +11698,74 @@ class QtMaterialLibraryTests(unittest.TestCase):
     def _material(self, window):
         return scene_mod.find_object(window.scene, "mug")["material"]
 
-    def _hover(self, window, combo, name, expect):
-        """Hover a popup item for real (the C19 helper's shape:
+    def _open_wheel(self, window):
+        window._open_wheel()
+        self._pump()
+        return window._wheel
+
+    def _hover(self, window, page, key, expect):
+        """Hover a wheel slice for real (the C19 helper's shape:
         move off the target first, then re-move until the
         preview lands, up to ~2 s)."""
         from PySide6 import QtTest
-        combo.showPopup()
-        self._pump(rounds=4)
-        view = combo.view()
-        index = combo.findData(name)
-        rect = view.visualRect(view.model().index(index, 0))
-        neutral = 0 if index != 0 else 1
-        neutral_rect = view.visualRect(
-            view.model().index(neutral, 0))
-        QtTest.QTest.mouseMove(view.viewport(), neutral_rect.center())
+        wheel = window._wheel
+        wheel.set_page(page)
+        window._sync_wheel()
+        self._pump(rounds=2)
+        slices = window._wheel_slices(page)
+        index = next(i for i, s in enumerate(slices) if s.key == key)
+        point = wheel.canvas.slice_point("outer", index)
+        QtTest.QTest.mouseMove(wheel.canvas,
+                               wheel.canvas.rect().center())
         self._pump(rounds=2)
         for _ in range(10):
-            QtTest.QTest.mouseMove(view.viewport(), rect.center())
+            QtTest.QTest.mouseMove(wheel.canvas, point)
             self._pump(rounds=2)
             if window._viewport._material_preview == expect:
                 return
 
-    def test_combo_groups_styles_by_family(self):
+    def _click_slice(self, window, page, key):
+        from PySide6 import QtCore, QtTest
+        wheel = window._wheel
+        wheel.set_page(page)
+        window._sync_wheel()
+        self._pump()
+        slices = window._wheel_slices(page)
+        index = next(i for i, s in enumerate(slices)
+                     if s.key == key)
+        QtTest.QTest.mouseClick(
+            wheel.canvas, QtCore.Qt.LeftButton,
+            pos=wheel.canvas.slice_point("outer", index))
+        self._pump()
+
+    def test_style_page_shows_every_style_in_family_order(self):
         window = self._open_tavern_mug()
-        combo = window._texture_combo
-        # None + 6 headers + 20 styles.
-        self.assertEqual(combo.count(), 27)
-        for key in textures.STYLES:
-            self.assertNotEqual(combo.findData(key), -1, key)
-        model = combo.model()
-        headers = [i for i in range(combo.count())
-                   if combo.itemData(i) is None]
-        self.assertEqual(len(headers), 6)
-        for header in headers:
-            self.assertFalse(model.item(header).isEnabled())
-        for i in range(combo.count()):
-            text = combo.itemText(i)
-            self.assertNotIn("\u2014", text)
-            self.assertNotIn("&", text)
+        self._open_wheel(window)
+        slices = window._wheel_slices("style")
+        # None + 20 styles, all on one ring, no paging, no cap.
+        self.assertEqual(len(slices), 21)
+        self.assertEqual(slices[0].key, "none")
+        keys = [s.key for s in slices[1:]]
+        self.assertEqual(set(keys), set(textures.STYLES))
+        # In family order: the families appear in FAMILIES order,
+        # each family's styles together.
+        families = [textures.STYLES[k]["family"] for k in keys]
+        seen = []
+        for family in families:
+            if family not in seen:
+                seen.append(family)
+        self.assertEqual(seen, [f for f, _d in textures.FAMILIES])
+        for slice_ in slices:
+            self.assertNotIn("\u2014", slice_.label)
+            self.assertNotIn("&", slice_.label)
+        for slice_ in slices[1:]:
+            self.assertIsNotNone(slice_.swatch, slice_.key)
         window.close()
 
     def test_picking_a_style_writes_style_and_texture(self):
         window = self._open_tavern_mug()
-        combo = window._texture_combo
-        combo.setCurrentIndex(combo.findData("stone_granite"))
-        self._pump()
+        self._open_wheel(window)
+        self._click_slice(window, "style", "stone_granite")
         mat = self._material(window)
         self.assertEqual(mat["style"], "stone_granite")
         self.assertEqual(mat["texture"], "stone_granite")
@@ -11570,16 +11778,19 @@ class QtMaterialLibraryTests(unittest.TestCase):
         mat["style"] = "metal_rusted"
         mat["texture"] = "metal_rusted"
         window._refresh_inspector()
-        self.assertEqual(window._texture_combo.currentText(),
-                         "Rusted metal")
-        self.assertEqual(window._texture_combo.currentData(),
-                         "metal_rusted")
+        self._open_wheel(window)
+        checked = [s.key for s in window._wheel_slices("style")
+                   if s.checked]
+        self.assertEqual(checked, ["metal_rusted"])
+        self.assertEqual(window._material_name.text(), "Rusted metal")
+        self.assertIn("Rusted metal",
+                      window._wheel.breadcrumb_text())
         window.close()
 
-    def test_hover_style_previews_and_header_restores(self):
+    def test_hover_style_previews_and_leaving_restores(self):
         window = self._open_tavern_mug()
-        combo = window._texture_combo
-        self._hover(window, combo, "stone_granite",
+        self._open_wheel(window)
+        self._hover(window, "style", "stone_granite",
                     ("mug", {"texture": "stone_granite",
                              "style": "stone_granite",
                              "params": {}, "wear": {}, "base_color": "#8a8a8f", "roughness": 0.7, "metalness": 0.0}))
@@ -11587,15 +11798,13 @@ class QtMaterialLibraryTests(unittest.TestCase):
                          ("mug", {"texture": "stone_granite",
                                   "style": "stone_granite",
                                   "params": {}, "wear": {}, "base_color": "#8a8a8f", "roughness": 0.7, "metalness": 0.0}))
-        # A family header carries no data: highlighting it ends
-        # the preview (called directly — Qt does not reliably
-        # fire the highlight signal for a disabled item under a
-        # real mouse hover, so the slot itself is the proof).
-        header = combo.findData("stone_granite") - 1
-        self.assertIsNone(combo.itemData(header))
-        window._on_texture_highlighted(header)
+        # Leaving the ring for the centre dial ends the preview.
+        from PySide6 import QtTest
+        QtTest.QTest.mouseMove(window._wheel.canvas,
+                               window._wheel.canvas.rect().center())
+        self._pump(rounds=4)
         self.assertIsNone(window._viewport._material_preview)
-        combo.hidePopup()
+        window._close_wheel()
         window.close()
 
     def test_styles_render_distinctly_on_the_same_object(self):
@@ -11620,30 +11829,25 @@ class QtMaterialLibraryTests(unittest.TestCase):
         window.close()
 
 
-def _param_row_labels(window):
-    # The row labels of _param_rows in order: knob labels, the
-    # Layout label, the layout size labels, then (Advanced only)
-    # the Life label and the wear labels. Help lines are word-
-    # wrapped; row labels are not, which is what tells them
-    # apart. The old stride-3 sampling broke when PO5 added the
-    # lone Life header — it shifts the phase after it, so the
-    # sampler picked up help lines instead of wear labels.
-    from PySide6 import QtWidgets
-    labels = []
-    for i in range(window._param_layout.count()):
-        widget = window._param_layout.itemAt(i).widget()
-        if (isinstance(widget, QtWidgets.QLabel)
-                and not widget.wordWrap()):
-            labels.append(widget.text())
-    return labels
+def _wheel_page_labels(window, page):
+    # The wheel page's slice labels in ring order (R2: the
+    # replacement for the old _param_row_labels — the knob rows
+    # moved onto the wheel's pages).
+    return [s.label for s in window._wheel_slices(page)]
+
+
+def _wheel_page_keys(window, page):
+    # The wheel page's slice keys in ring order.
+    return [s.key for s in window._wheel_slices(page)]
 
 
 @unittest.skipUnless(QT_TESTS, "Qt tests need LIGHT_ENGINE_QT_TESTS=1")
 class QtMaterialParamsTests(unittest.TestCase):
-    """PO2: per-material knobs — contextual rows that swap with
-    the style, live re-renders through a debounced re-bake, one
-    undo step per gesture, and the UI12 preview showing a style
-    with its defaults while the stored params survive."""
+    """PO2 (R2: the wheel's Detail page + centre dial) — knobs
+    that swap with the style, live re-renders through a
+    debounced re-bake, one undo step per gesture, and the UI12
+    preview showing a style with its defaults while the stored
+    params survive."""
 
     @classmethod
     def setUpClass(cls):
@@ -11675,9 +11879,39 @@ class QtMaterialParamsTests(unittest.TestCase):
     def _material(self, window):
         return scene_mod.find_object(window.scene, "mug")["material"]
 
+    def _open_wheel(self, window):
+        window._open_wheel()
+        self._pump()
+        return window._wheel
+
+    def _click_slice(self, window, page, key):
+        from PySide6 import QtCore, QtTest
+        wheel = window._wheel
+        wheel.set_page(page)
+        window._sync_wheel()
+        self._pump()
+        slices = window._wheel_slices(page)
+        index = next(i for i, s in enumerate(slices) if s.key == key)
+        QtTest.QTest.mouseClick(
+            wheel.canvas, QtCore.Qt.LeftButton,
+            pos=wheel.canvas.slice_point("outer", index))
+        self._pump()
+
     def _pick_style(self, window, style):
-        combo = window._texture_combo
-        combo.setCurrentIndex(combo.findData(style))
+        self._click_slice(window, "style", style)
+
+    def _load_knob(self, window, page, key):
+        """Click a knob slice to load it into the centre dial;
+        returns the dial."""
+        self._click_slice(window, page, key)
+        return window._wheel.dial
+
+    def _dial_set(self, window, value):
+        """A dial gesture: move to the value, then release (the
+        release commits the one undo step)."""
+        dial = window._wheel.dial
+        dial.setValue(value)
+        dial.editingFinished.emit()
         self._pump()
 
     def _render_bytes(self, window, tmp):
@@ -11700,103 +11934,106 @@ class QtMaterialParamsTests(unittest.TestCase):
             self._pump(rounds=2)
         return False
 
-    def _hover(self, window, combo, name, expect):
-        """Hover a popup item for real (the C19 helper's shape:
+    def _hover(self, window, page, key, expect):
+        """Hover a wheel slice for real (the C19 helper's shape:
         move off the target first, then re-move until the
         preview lands, up to ~2 s)."""
         from PySide6 import QtTest
-        combo.showPopup()
-        self._pump(rounds=4)
-        view = combo.view()
-        index = combo.findData(name)
-        rect = view.visualRect(view.model().index(index, 0))
-        neutral = 0 if index != 0 else 1
-        neutral_rect = view.visualRect(
-            view.model().index(neutral, 0))
-        QtTest.QTest.mouseMove(view.viewport(), neutral_rect.center())
+        wheel = window._wheel
+        wheel.set_page(page)
+        window._sync_wheel()
+        self._pump(rounds=2)
+        slices = window._wheel_slices(page)
+        index = next(i for i, s in enumerate(slices) if s.key == key)
+        point = wheel.canvas.slice_point("outer", index)
+        QtTest.QTest.mouseMove(wheel.canvas,
+                               wheel.canvas.rect().center())
         self._pump(rounds=2)
         for _ in range(10):
-            QtTest.QTest.mouseMove(view.viewport(), rect.center())
+            QtTest.QTest.mouseMove(wheel.canvas, point)
             self._pump(rounds=2)
             if window._viewport._material_preview == expect:
                 return
 
-    def test_param_rows_swap_with_style(self):
+    def test_detail_slices_swap_with_style(self):
         window = self._open_tavern_mug()
-        # The mug has no style: no knobs.
-        self.assertEqual(window._param_spins, {})
-        self.assertEqual(window._param_layout.count(), 0)
+        self._open_wheel(window)
+        # The mug has no style: no detail knobs.
+        self.assertEqual(_wheel_page_keys(window, "detail"), [])
         self._pick_style(window, "wood_cathedral")
         # PO3: Simple (the default) shows only the simple knobs.
-        self.assertEqual(set(window._param_spins),
+        self.assertEqual(set(_wheel_page_keys(window, "detail")),
                          {"rings", "strength"})
-        labels = _param_row_labels(window)
-        self.assertEqual(labels, ["Ring spacing", "Grain strength"])
+        self.assertEqual(_wheel_page_labels(window, "detail"),
+                         ["Ring spacing", "Grain strength"])
         # The defaults display in the knobs' own units: 14 rings
         # across a one-metre tile is 7.1 cm apart.
-        self.assertAlmostEqual(window._param_spins["rings"].value(),
-                               7.1, places=1)
-        self.assertEqual(window._param_spins["strength"].value(), 0.3)
-        # Advanced shows every knob, wobble included — plus the
-        # layout picker (PO4), which is Advanced-only. The current
-        # layout is solid, so no size rows follow it.
-        window._material_advanced_check.setChecked(True)
-        self._pump()
-        self.assertEqual(set(window._param_spins),
+        dial = self._load_knob(window, "detail", "rings")
+        self.assertAlmostEqual(dial.value(), 7.1, places=1)
+        dial = self._load_knob(window, "detail", "strength")
+        self.assertEqual(dial.value(), 0.3)
+        # Advanced shows every knob, wobble included — the
+        # layouts on the Layout page (PO4), the wear on the Life
+        # page (PO5). The current layout is solid, so no size
+        # knobs follow the picks.
+        self._click_slice(window, "material", "advanced")
+        self.assertEqual(set(_wheel_page_keys(window, "detail")),
                          {"rings", "strength", "wobble"})
-        labels = _param_row_labels(window)
-        self.assertEqual(labels, ["Ring spacing", "Grain strength",
-                                  "Ring wobble", "Layout", "Life",
-                                  "Dirt", "Grime", "Edge wear",
-                                  "Moss", "Wetness"])
-        self.assertEqual(window._param_spins["wobble"].value(), 3.0)
-        # Back to Simple: wobble's row goes, the others stay.
-        window._material_advanced_check.setChecked(False)
-        self._pump()
-        self.assertEqual(set(window._param_spins),
+        self.assertEqual(_wheel_page_labels(window, "detail"),
+                         ["Ring spacing", "Grain strength",
+                          "Ring wobble"])
+        self.assertEqual(_wheel_page_keys(window, "layout"),
+                         ["solid", "boards", "parquet",
+                          "chevron", "herringbone", "strip"])
+        self.assertEqual(_wheel_page_labels(window, "life"),
+                         ["Dirt", "Grime", "Edge wear",
+                          "Moss", "Wetness"])
+        dial = self._load_knob(window, "detail", "wobble")
+        self.assertEqual(dial.value(), 3.0)
+        # Back to Simple: wobble goes, the others stay.
+        self._click_slice(window, "material", "advanced")
+        self.assertEqual(set(_wheel_page_keys(window, "detail")),
                          {"rings", "strength"})
         self._pick_style(window, "brick_stretcher")
-        self.assertEqual(set(window._param_spins),
+        self.assertEqual(set(_wheel_page_keys(window, "detail")),
                          {"cols", "rows", "mortar"})
-        labels = _param_row_labels(window)
-        self.assertEqual(labels, ["Brick length", "Course height",
-                                  "Mortar width"])
-        window._material_advanced_check.setChecked(True)
-        self._pump()
-        self.assertEqual(set(window._param_spins),
+        self.assertEqual(_wheel_page_labels(window, "detail"),
+                         ["Brick length", "Course height",
+                          "Mortar width"])
+        self._click_slice(window, "material", "advanced")
+        self.assertEqual(set(_wheel_page_keys(window, "detail")),
                          {"cols", "rows", "mortar", "variation"})
-        labels = _param_row_labels(window)
-        self.assertEqual(labels, ["Brick length", "Course height",
-                                  "Mortar width", "Tone variation",
-                                  "Layout", "Life", "Dirt", "Grime",
-                                  "Edge wear", "Moss", "Crack spacing",
-                                  "Wetness"])
+        self.assertEqual(_wheel_page_labels(window, "detail"),
+                         ["Brick length", "Course height",
+                          "Mortar width", "Tone variation"])
+        self.assertEqual(_wheel_page_labels(window, "life"),
+                         ["Dirt", "Grime", "Edge wear", "Moss",
+                          "Crack spacing", "Wetness"])
         self._pick_style(window, "none")
-        self.assertEqual(window._param_spins, {})
+        self.assertEqual(_wheel_page_keys(window, "detail"), [])
         # Advanced is still on, so the style-less material keeps
         # its generic wear rows (PO5: wear applies to any
-        # material, styled or not) — the Life label plus five
-        # rows of three widgets.
-        self.assertEqual(_param_row_labels(window),
-                         ["Life", "Dirt", "Grime", "Edge wear",
+        # material, styled or not).
+        self.assertEqual(_wheel_page_labels(window, "life"),
+                         ["Dirt", "Grime", "Edge wear",
                           "Moss", "Wetness"])
-        self.assertEqual(window._param_layout.count(), 16)
         window.close()
 
     def test_ring_spacing_renders_differently(self):
         # The spec's done-when: 1.6 cm vs 0.4 cm ring spacing
         # (62.5 vs 250 rings per tile) renders differently.
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._pick_style(window, "wood_cathedral")
-        spin = window._param_spins["rings"]
+        dial = self._load_knob(window, "detail", "rings")
         with tempfile.TemporaryDirectory() as tmp:
-            spin.setValue(1.6)
+            dial.setValue(1.6)
             self.assertTrue(self._wait_for_bake(
                 window, "wood_cathedral", {"rings": 62.5}))
             self.assertEqual(self._material(window)["params"]["rings"],
                              62.5)
             first = self._render_bytes(window, tmp)
-            spin.setValue(0.4)
+            dial.setValue(0.4)
             self.assertTrue(self._wait_for_bake(
                 window, "wood_cathedral", {"rings": 250.0}))
             self.assertEqual(self._material(window)["params"]["rings"],
@@ -11806,11 +12043,12 @@ class QtMaterialParamsTests(unittest.TestCase):
 
     def test_knob_change_re_renders_live(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._pick_style(window, "wood_cathedral")
         with tempfile.TemporaryDirectory() as tmp:
             before = self._render_bytes(window, tmp)
-            spin = window._param_spins["strength"]
-            spin.setValue(0.8)
+            dial = self._load_knob(window, "detail", "strength")
+            dial.setValue(0.8)
             # The debounced repaint landed: the viewport baked a
             # texture with the new value, with no render call.
             self.assertTrue(self._wait_for_bake(
@@ -11824,6 +12062,7 @@ class QtMaterialParamsTests(unittest.TestCase):
         # texture cache.
         from light_engine import viewport as viewport_mod
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._pick_style(window, "wood_cathedral")
         calls = []
         real_build = viewport_mod.build_qimage
@@ -11840,9 +12079,9 @@ class QtMaterialParamsTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 self._render_bytes(window, tmp)  # warm the cache
             del calls[:]
-            spin = window._param_spins["strength"]
+            dial = self._load_knob(window, "detail", "strength")
             for value in (0.35, 0.40, 0.45, 0.50, 0.55):
-                spin.setValue(value)
+                dial.setValue(value)
             self.assertTrue(self._wait_for_bake(
                 window, "wood_cathedral", {"strength": 0.55}))
             self.assertEqual(len(calls), 1)
@@ -11854,43 +12093,44 @@ class QtMaterialParamsTests(unittest.TestCase):
 
     def test_one_undo_step_per_gesture(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._pick_style(window, "wood_cathedral")
         before = len(window._undo_stack)
-        spin = window._param_spins["strength"]
-        spin.setValue(0.5)
-        spin.setValue(0.6)
-        spin.setValue(0.7)
-        spin.editingFinished.emit()
+        dial = self._load_knob(window, "detail", "strength")
+        dial.setValue(0.5)
+        dial.setValue(0.6)
+        dial.setValue(0.7)
+        dial.editingFinished.emit()
         self.assertEqual(len(window._undo_stack), before + 1)
         self.assertEqual(self._material(window)["params"]["strength"],
                          0.7)
         window.undo()
         self._pump()
         self.assertEqual(self._material(window)["params"], {})
-        # The rows rebuilt from the restored scene: the spin is
-        # a new widget showing the default again.
-        self.assertEqual(window._param_spins["strength"].value(), 0.3)
+        # The dial re-syncs from the restored scene: the default
+        # again.
+        self.assertEqual(window._wheel.dial.value(), 0.3)
         window.close()
 
     def test_noop_gesture_pushes_no_step(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._pick_style(window, "wood_cathedral")
         before = len(window._undo_stack)
-        spin = window._param_spins["strength"]
-        spin.setValue(0.5)
-        spin.setValue(0.3)  # back to the default
-        spin.editingFinished.emit()
+        dial = self._load_knob(window, "detail", "strength")
+        dial.setValue(0.5)
+        dial.setValue(0.3)  # back to the default
+        dial.editingFinished.emit()
         self.assertEqual(len(window._undo_stack), before)
         self.assertEqual(self._material(window)["params"], {})
         window.close()
 
     def test_style_pick_resets_params_to_defaults(self):
         window = self._open_tavern_mug()
-        combo = window._texture_combo
+        self._open_wheel(window)
         self._pick_style(window, "wood_cathedral")
-        spin = window._param_spins["rings"]
-        spin.setValue(1.6)
-        spin.editingFinished.emit()
+        self._load_knob(window, "detail", "rings")
+        self._dial_set(window, 1.6)
         self.assertEqual(self._material(window)["params"],
                          {"rings": 62.5})
         before = len(window._undo_stack)
@@ -11905,21 +12145,20 @@ class QtMaterialParamsTests(unittest.TestCase):
         self.assertEqual(len(window._undo_stack), before + 1)
         # PO3: Simple (the default) shows brick's three simple
         # knobs; Tone variation waits in Advanced.
-        self.assertEqual(set(window._param_spins),
+        self.assertEqual(set(_wheel_page_keys(window, "detail")),
                          {"cols", "rows", "mortar"})
         window.close()
 
     def test_preview_shows_style_with_defaults_and_restores(self):
         window = self._open_tavern_mug()
-        combo = window._texture_combo
+        self._open_wheel(window)
         self._pick_style(window, "wood_cathedral")
-        spin = window._param_spins["rings"]
-        spin.setValue(1.6)
-        spin.editingFinished.emit()
+        self._load_knob(window, "detail", "rings")
+        self._dial_set(window, 1.6)
         self._pump()
         with tempfile.TemporaryDirectory() as tmp:
             before = self._render_bytes(window, tmp)
-            self._hover(window, combo, "brick_stretcher",
+            self._hover(window, "style", "brick_stretcher",
                         ("mug", {"texture": "brick_stretcher",
                                  "style": "brick_stretcher",
                                  "params": {}, "wear": {}, "base_color": "#9a4a32", "roughness": 0.95, "metalness": 0.0}))
@@ -11928,7 +12167,7 @@ class QtMaterialParamsTests(unittest.TestCase):
                                       "style": "brick_stretcher",
                                       "params": {}, "wear": {}, "base_color": "#9a4a32", "roughness": 0.95, "metalness": 0.0}))
             self.assertNotEqual(self._render_bytes(window, tmp), before)
-            combo.hidePopup()
+            window._close_wheel()
             self._pump(rounds=4)
             self.assertIsNone(window._viewport._material_preview)
             # Byte-identical to before the hover: the tuned
@@ -11938,52 +12177,33 @@ class QtMaterialParamsTests(unittest.TestCase):
                              {"rings": 62.5})
         window.close()
 
-    def test_param_rows_fit_the_pane(self):
-        # The tallest knob set (brick, 4 knobs) fits the pane
-        # sideways: every spin's left and right edges land inside
-        # the inspector scroll viewport (the C8 pane-fit shape).
-        # PO3: Advanced shows all four — Simple shows three.
-        window = self._open_tavern_mug()
-        window._material_advanced_check.setChecked(True)
-        self._pick_style(window, "brick_stretcher")
-        self._pump()
-        scroll = window._inspector_scroll
-        viewport_width = scroll.viewport().width()
-        self.assertTrue(window._param_spins)
-        for spin in window._param_spins.values():
-            top_left = scroll.viewport().mapFromGlobal(
-                spin.mapToGlobal(spin.rect().topLeft()))
-            bottom_right = scroll.viewport().mapFromGlobal(
-                spin.mapToGlobal(spin.rect().bottomRight()))
-            self.assertGreaterEqual(top_left.x(), 0, spin)
-            self.assertLessEqual(bottom_right.x(), viewport_width, spin)
-        window.close()
+    # test_param_rows_fit_the_pane RETIRED in R2: the knob rows
+    # moved onto the wheel's rings — there is no inspector pane
+    # for them to fit. The wheel's own fit is covered by
+    # QtWheelTests.test_wheel_fits_inside_the_pane.
 
-    def test_help_lines_present_for_param_rows(self):
+    def test_help_lines_present_for_detail_knobs(self):
         from light_engine import inspector_data as inspector_mod
-        from PySide6 import QtWidgets
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         # PO3: Advanced shows all three cathedral knobs, so every
-        # help line is present; Simple hides Ring wobble's.
-        window._material_advanced_check.setChecked(True)
+        # help line is reachable; Simple hides Ring wobble's.
+        self._click_slice(window, "material", "advanced")
         self._pick_style(window, "wood_cathedral")
-        self._pump()
-        labels = window._param_rows.findChildren(QtWidgets.QLabel)
-        by_text = {lbl.text(): lbl for lbl in labels}
         for knob in inspector_mod.PARAM_UI["wood_cathedral"]:
-            self.assertIn(knob["label"], by_text, knob)
-            help_text = inspector_mod.FIELD_HELP[knob["help"]]
-            self.assertIn(help_text, by_text, knob)
-            self.assertTrue(by_text[help_text].isVisible(), knob)
+            self._hover(window, "detail", knob["param"], None)
+            self.assertEqual(
+                window._wheel.help_text(),
+                inspector_mod.FIELD_HELP[knob["help"]], knob)
         window.close()
 
 
 @unittest.skipUnless(QT_TESTS, "Qt tests need LIGHT_ENGINE_QT_TESTS=1")
 class QtMaterialSimpleAdvancedTests(unittest.TestCase):
-    """PO3: Simple / Advanced material UI — Simple (the default)
-    shows only the knobs that change the look most, Advanced
-    shows every knob, and toggling never loses a value. The
-    toggle is session-only, like the T19 look tick: it never
+    """PO3 (R2: the wheel's Material page toggle) — Simple (the
+    default) shows only the knobs that change the look most,
+    Advanced shows every knob, and toggling never loses a value.
+    The toggle is session-only, like the T19 look tick: it never
     reaches the scene file, pushes no undo step, and never sets
     the modified flag."""
 
@@ -12017,9 +12237,38 @@ class QtMaterialSimpleAdvancedTests(unittest.TestCase):
     def _material(self, window):
         return scene_mod.find_object(window.scene, "mug")["material"]
 
+    def _open_wheel(self, window):
+        window._open_wheel()
+        self._pump()
+        return window._wheel
+
+    def _click_slice(self, window, page, key):
+        from PySide6 import QtCore, QtTest
+        wheel = window._wheel
+        wheel.set_page(page)
+        window._sync_wheel()
+        self._pump()
+        slices = window._wheel_slices(page)
+        index = next(i for i, s in enumerate(slices) if s.key == key)
+        QtTest.QTest.mouseClick(
+            wheel.canvas, QtCore.Qt.LeftButton,
+            pos=wheel.canvas.slice_point("outer", index))
+        self._pump()
+
     def _pick_style(self, window, style):
-        combo = window._texture_combo
-        combo.setCurrentIndex(combo.findData(style))
+        self._click_slice(window, "style", style)
+
+    def _toggle_advanced(self, window):
+        self._click_slice(window, "material", "advanced")
+
+    def _load_knob(self, window, page, key):
+        self._click_slice(window, page, key)
+        return window._wheel.dial
+
+    def _dial_set(self, window, value):
+        dial = window._wheel.dial
+        dial.setValue(value)
+        dial.editingFinished.emit()
         self._pump()
 
     def _render_bytes(self, window, tmp):
@@ -12028,105 +12277,106 @@ class QtMaterialSimpleAdvancedTests(unittest.TestCase):
         with open(path, "rb") as fh:
             return fh.read()
 
-    def _hover(self, window, combo, name, expect):
-        """Hover a popup item for real (the C19 helper's shape:
+    def _hover(self, window, page, key, expect):
+        """Hover a wheel slice for real (the C19 helper's shape:
         move off the target first, then re-move until the
         preview lands, up to ~2 s)."""
         from PySide6 import QtTest
-        combo.showPopup()
-        self._pump(rounds=4)
-        view = combo.view()
-        index = combo.findData(name)
-        rect = view.visualRect(view.model().index(index, 0))
-        neutral = 0 if index != 0 else 1
-        neutral_rect = view.visualRect(
-            view.model().index(neutral, 0))
-        QtTest.QTest.mouseMove(view.viewport(), neutral_rect.center())
+        wheel = window._wheel
+        wheel.set_page(page)
+        window._sync_wheel()
+        self._pump(rounds=2)
+        slices = window._wheel_slices(page)
+        index = next(i for i, s in enumerate(slices) if s.key == key)
+        point = wheel.canvas.slice_point("outer", index)
+        QtTest.QTest.mouseMove(wheel.canvas,
+                               wheel.canvas.rect().center())
         self._pump(rounds=2)
         for _ in range(10):
-            QtTest.QTest.mouseMove(view.viewport(), rect.center())
+            QtTest.QTest.mouseMove(wheel.canvas, point)
             self._pump(rounds=2)
             if window._viewport._material_preview == expect:
                 return
 
     def test_simple_is_the_default(self):
         window = self._open_tavern_mug()
-        self.assertFalse(window._material_advanced_check.isChecked())
-        self.assertEqual(window._material_advanced_check.text(),
-                         "Show all settings")
+        self._open_wheel(window)
+        self.assertFalse(window._material_advanced)
+        advanced = next(s for s in window._wheel_slices("material")
+                        if s.key == "advanced")
+        self.assertEqual(advanced.label, "Show all settings")
+        self.assertFalse(advanced.checked)
         self._pick_style(window, "wood_cathedral")
-        self.assertEqual(set(window._param_spins),
+        self.assertEqual(set(_wheel_page_keys(window, "detail")),
                          {"rings", "strength"})
         window.close()
 
     def test_advanced_shows_all_rows(self):
         window = self._open_tavern_mug()
-        window._material_advanced_check.setChecked(True)
+        self._open_wheel(window)
+        self._toggle_advanced(window)
         self._pick_style(window, "brick_stretcher")
-        self.assertEqual(set(window._param_spins),
+        self.assertEqual(set(_wheel_page_keys(window, "detail")),
                          {"cols", "rows", "mortar", "variation"})
         self._pick_style(window, "stone_marble_carrara")
-        self.assertEqual(set(window._param_spins),
+        self.assertEqual(set(_wheel_page_keys(window, "detail")),
                          {"veins", "bands", "warp"})
         window.close()
 
     def test_toggle_round_trip_loses_no_value(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._pick_style(window, "wood_cathedral")
         # Edit the Advanced-only knob (wobble) in Advanced, and
         # a Simple knob (rings) too.
-        window._material_advanced_check.setChecked(True)
-        self._pump()
-        wobble = window._param_spins["wobble"]
-        wobble.setValue(5.0)
-        wobble.editingFinished.emit()
-        rings = window._param_spins["rings"]
-        rings.setValue(1.6)
-        rings.editingFinished.emit()
+        self._toggle_advanced(window)
+        self._load_knob(window, "detail", "wobble")
+        self._dial_set(window, 5.0)
+        self._load_knob(window, "detail", "rings")
+        self._dial_set(window, 1.6)
         self.assertEqual(self._material(window)["params"],
                          {"wobble": 5.0, "rings": 62.5})
-        # Simple hides wobble's row — but the value stays stored.
-        window._material_advanced_check.setChecked(False)
-        self._pump()
-        self.assertNotIn("wobble", window._param_spins)
-        self.assertEqual(window._param_spins["rings"].value(), 1.6)
+        # Simple hides wobble's slice — but the value stays stored.
+        self._toggle_advanced(window)
+        self.assertNotIn("wobble",
+                         _wheel_page_keys(window, "detail"))
+        dial = self._load_knob(window, "detail", "rings")
+        self.assertEqual(dial.value(), 1.6)
         self.assertEqual(self._material(window)["params"],
                          {"wobble": 5.0, "rings": 62.5})
-        # Back to Advanced: wobble's row returns with its value.
-        window._material_advanced_check.setChecked(True)
-        self._pump()
-        self.assertEqual(window._param_spins["wobble"].value(), 5.0)
-        self.assertEqual(window._param_spins["rings"].value(), 1.6)
+        # Back to Advanced: wobble's slice returns with its value.
+        self._toggle_advanced(window)
+        dial = self._load_knob(window, "detail", "wobble")
+        self.assertEqual(dial.value(), 5.0)
+        dial = self._load_knob(window, "detail", "rings")
+        self.assertEqual(dial.value(), 1.6)
         window.close()
 
     def test_toggle_pushes_no_undo_step_and_no_modified_flag(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         # No edits yet: clean flag, empty stack.
         self.assertFalse(window.isWindowModified())
         self.assertEqual(len(window._undo_stack), 0)
-        window._material_advanced_check.setChecked(True)
-        self._pump()
-        window._material_advanced_check.setChecked(False)
-        self._pump()
+        self._toggle_advanced(window)
+        self._toggle_advanced(window)
         self.assertFalse(window.isWindowModified())
         self.assertEqual(len(window._undo_stack), 0)
         # And after a real edit, toggling changes neither.
         self._pick_style(window, "wood_cathedral")
         self.assertTrue(window.isWindowModified())
         before = len(window._undo_stack)
-        window._material_advanced_check.setChecked(True)
-        self._pump()
-        window._material_advanced_check.setChecked(False)
-        self._pump()
+        self._toggle_advanced(window)
+        self._toggle_advanced(window)
         self.assertTrue(window.isWindowModified())
         self.assertEqual(len(window._undo_stack), before)
         window.close()
 
     def test_toggle_is_session_only(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._pick_style(window, "wood_cathedral")
-        window._material_advanced_check.setChecked(True)
-        self._pump()
+        self._toggle_advanced(window)
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "scene.json")
             scene_mod.save_scene(window.scene, path)
@@ -12141,29 +12391,32 @@ class QtMaterialSimpleAdvancedTests(unittest.TestCase):
             fresh = self.MainWindow(
                 scene=scene_mod.load_scene(path))
         self._show(fresh)
-        self.assertFalse(fresh._material_advanced_check.isChecked())
+        self.assertFalse(fresh._material_advanced)
         fresh.close()
         window.close()
 
     def test_simple_rows_match_the_simple_flags_for_every_style(self):
         from light_engine import inspector_data as inspector_mod
         window = self._open_tavern_mug()
-        combo = window._texture_combo
+        self._open_wheel(window)
         for style, knobs in inspector_mod.PARAM_UI.items():
-            combo.setCurrentIndex(combo.findData(style))
+            # The apply path (the old test drove the combo the
+            # same way — the click path is proven elsewhere).
+            window._apply_style(style)
             self._pump(2)
             want = {k["param"] for k in knobs if k["simple"]}
-            self.assertEqual(set(window._param_spins), want, style)
+            self.assertEqual(set(_wheel_page_keys(window, "detail")),
+                             want, style)
         window.close()
 
     def test_hover_preview_works_in_both_modes(self):
         window = self._open_tavern_mug()
-        combo = window._texture_combo
+        self._open_wheel(window)
         self._pick_style(window, "wood_cathedral")
         with tempfile.TemporaryDirectory() as tmp:
             before = self._render_bytes(window, tmp)
             # Simple mode: hover a style, the preview lands.
-            self._hover(window, combo, "brick_stretcher",
+            self._hover(window, "style", "brick_stretcher",
                         ("mug", {"texture": "brick_stretcher",
                                  "style": "brick_stretcher",
                                  "params": {}, "wear": {}, "base_color": "#9a4a32", "roughness": 0.95, "metalness": 0.0}))
@@ -12172,13 +12425,13 @@ class QtMaterialSimpleAdvancedTests(unittest.TestCase):
                                       "style": "brick_stretcher",
                                       "params": {}, "wear": {}, "base_color": "#9a4a32", "roughness": 0.95, "metalness": 0.0}))
             self.assertNotEqual(self._render_bytes(window, tmp), before)
-            combo.hidePopup()
+            window._close_wheel()
             self._pump(rounds=4)
             self.assertIsNone(window._viewport._material_preview)
             # Advanced mode: the same, on another style.
-            window._material_advanced_check.setChecked(True)
-            self._pump()
-            self._hover(window, combo, "stone_marble_carrara",
+            self._open_wheel(window)
+            self._toggle_advanced(window)
+            self._hover(window, "style", "stone_marble_carrara",
                         ("mug", {"texture": "stone_marble_carrara",
                                  "style": "stone_marble_carrara",
                                  "params": {}, "wear": {}, "base_color": "#f0f0ea", "roughness": 0.35, "metalness": 0.0}))
@@ -12187,29 +12440,36 @@ class QtMaterialSimpleAdvancedTests(unittest.TestCase):
                                       "style": "stone_marble_carrara",
                                       "params": {}, "wear": {}, "base_color": "#f0f0ea", "roughness": 0.35, "metalness": 0.0}))
             self.assertNotEqual(self._render_bytes(window, tmp), before)
-            combo.hidePopup()
+            window._close_wheel()
             self._pump(rounds=4)
             self.assertIsNone(window._viewport._material_preview)
         window.close()
 
     def test_toggle_disabled_with_no_selection(self):
         window = self._open_tavern_mug()
-        self.assertTrue(window._material_advanced_check.isEnabled())
+        self._open_wheel(window)
+
+        def advanced_slice():
+            return next(s for s in window._wheel_slices("material")
+                        if s.key == "advanced")
+
+        self.assertTrue(advanced_slice().enabled)
         window._select(None)
         self._pump()
-        self.assertFalse(window._material_advanced_check.isEnabled())
+        self.assertFalse(advanced_slice().enabled)
         window._select("mug")
         self._pump()
-        self.assertTrue(window._material_advanced_check.isEnabled())
+        self.assertTrue(advanced_slice().enabled)
         window.close()
 
 
 @unittest.skipUnless(QT_TESTS, "Qt tests need LIGHT_ENGINE_QT_TESTS=1")
 class QtMaterialLayoutTests(unittest.TestCase):
-    """PO4: layouts + real-world sizes — the picker (Advanced-only,
-    hidden for solid-only styles), the size rows, one undo step per
-    pick and per size gesture, the style-pick reset, save/load
-    round-trip, the UI12 hover-preview, and renders that differ."""
+    """PO4 (R2: the wheel's Layout page) — the layout picks
+    (size knobs Advanced-only, one slice for solid-only styles),
+    one undo step per pick and per size gesture, the style-pick
+    reset, save/load round-trip, the UI12 hover-preview, and
+    renders that differ."""
 
     @classmethod
     def setUpClass(cls):
@@ -12241,21 +12501,41 @@ class QtMaterialLayoutTests(unittest.TestCase):
     def _material(self, window):
         return scene_mod.find_object(window.scene, "mug")["material"]
 
-    def _pick_style(self, window, style):
-        combo = window._texture_combo
-        combo.setCurrentIndex(combo.findData(style))
+    def _open_wheel(self, window):
+        window._open_wheel()
         self._pump()
+        return window._wheel
+
+    def _click_slice(self, window, page, key):
+        from PySide6 import QtCore, QtTest
+        wheel = window._wheel
+        wheel.set_page(page)
+        window._sync_wheel()
+        self._pump()
+        slices = window._wheel_slices(page)
+        index = next(i for i, s in enumerate(slices) if s.key == key)
+        QtTest.QTest.mouseClick(
+            wheel.canvas, QtCore.Qt.LeftButton,
+            pos=wheel.canvas.slice_point("outer", index))
+        self._pump()
+
+    def _pick_style(self, window, style):
+        self._click_slice(window, "style", style)
 
     def _advanced(self, window):
-        window._material_advanced_check.setChecked(True)
-        self._pump()
+        self._click_slice(window, "material", "advanced")
 
     def _pick_layout(self, window, layout):
-        # The combo is rebuilt on every sync, so fetch it fresh;
-        # the pick defers its row rebuild a turn (the combo is
-        # the signal sender), so pump before asserting rows.
-        combo = window._layout_combo
-        combo.setCurrentIndex(combo.findData(layout))
+        self._click_slice(window, "layout", layout)
+
+    def _load_knob(self, window, page, key):
+        self._click_slice(window, page, key)
+        return window._wheel.dial
+
+    def _dial_set(self, window, value):
+        dial = window._wheel.dial
+        dial.setValue(value)
+        dial.editingFinished.emit()
         self._pump()
 
     def _render_bytes(self, window, tmp):
@@ -12264,68 +12544,75 @@ class QtMaterialLayoutTests(unittest.TestCase):
         with open(path, "rb") as fh:
             return fh.read()
 
-    def _hover(self, window, combo, name, expect):
-        """Hover a popup item for real (the C19 helper's shape:
+    def _hover(self, window, page, key, expect):
+        """Hover a wheel slice for real (the C19 helper's shape:
         move off the target first, then re-move until the
         preview lands, up to ~2 s)."""
         from PySide6 import QtTest
-        combo.showPopup()
-        self._pump(rounds=4)
-        view = combo.view()
-        index = combo.findData(name)
-        rect = view.visualRect(view.model().index(index, 0))
-        neutral = 0 if index != 0 else 1
-        neutral_rect = view.visualRect(
-            view.model().index(neutral, 0))
-        QtTest.QTest.mouseMove(view.viewport(), neutral_rect.center())
+        wheel = window._wheel
+        wheel.set_page(page)
+        window._sync_wheel()
+        self._pump(rounds=2)
+        slices = window._wheel_slices(page)
+        index = next(i for i, s in enumerate(slices) if s.key == key)
+        point = wheel.canvas.slice_point("outer", index)
+        QtTest.QTest.mouseMove(wheel.canvas,
+                               wheel.canvas.rect().center())
         self._pump(rounds=2)
         for _ in range(10):
-            QtTest.QTest.mouseMove(view.viewport(), rect.center())
+            QtTest.QTest.mouseMove(wheel.canvas, point)
             self._pump(rounds=2)
             if window._viewport._material_preview == expect:
                 return
 
-    def test_picker_hidden_for_solid_only_styles(self):
+    def test_solid_only_styles_show_one_layout_slice(self):
         window = self._open_tavern_mug()
-        # Metal takes only solid: no picker, even in Advanced.
+        self._open_wheel(window)
+        # Metal takes only solid: one slice, even in Advanced.
         self._advanced(window)
         self._pick_style(window, "metal_brushed")
-        self.assertIsNone(window._layout_combo)
-        self.assertEqual(window._layout_spins, {})
-        # And Simple hides the picker for every style, even one
-        # with a choice.
-        window._material_advanced_check.setChecked(False)
+        self.assertEqual(_wheel_page_keys(window, "layout"),
+                         ["solid"])
+        # And Simple shows the picks but no size knobs for any
+        # style, even one with a choice.
+        self._click_slice(window, "material", "advanced")
         self._pick_style(window, "wood_cathedral")
-        self.assertIsNone(window._layout_combo)
-        self.assertEqual(window._layout_spins, {})
+        keys = _wheel_page_keys(window, "layout")
+        self.assertEqual(keys, ["solid", "boards", "parquet",
+                                "chevron", "herringbone", "strip"])
+        self.assertFalse([k for k in keys if k.startswith("size_")])
         window.close()
 
-    def test_picker_shown_in_advanced_for_wood(self):
+    def test_layout_picks_shown_in_advanced_for_wood(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._advanced(window)
         self._pick_style(window, "wood_cathedral")
-        combo = window._layout_combo
-        self.assertIsNotNone(combo)
-        items = [(combo.itemText(i), combo.itemData(i))
-                 for i in range(combo.count())]
+        items = [(s.label, s.key)
+                 for s in window._wheel_slices("layout")]
         self.assertEqual(items, [("Solid", "solid"),
                                  ("Boards", "boards"),
                                  ("Parquet", "parquet"),
                                  ("Chevron", "chevron"),
                                  ("Herringbone", "herringbone"),
                                  ("Strip", "strip")])
-        self.assertEqual(combo.currentData(), "solid")
-        # Solid has no pieces, so no size rows follow the picker.
-        self.assertEqual(window._layout_spins, {})
-        labels = _param_row_labels(window)
-        self.assertEqual(labels, ["Ring spacing", "Grain strength",
-                                  "Ring wobble", "Layout", "Life",
-                                  "Dirt", "Grime", "Edge wear",
-                                  "Moss", "Wetness"])
+        checked = [s.key for s in window._wheel_slices("layout")
+                   if s.checked]
+        self.assertEqual(checked, ["solid"])
+        # Solid has no pieces, so no size knobs follow the picks.
+        self.assertFalse([s for s in window._wheel_slices("layout")
+                          if s.kind == "knob"])
+        self.assertEqual(_wheel_page_labels(window, "detail"),
+                         ["Ring spacing", "Grain strength",
+                          "Ring wobble"])
+        self.assertEqual(_wheel_page_labels(window, "life"),
+                         ["Dirt", "Grime", "Edge wear",
+                          "Moss", "Wetness"])
         window.close()
 
     def test_layout_pick_applies_and_undoes(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._advanced(window)
         self._pick_style(window, "wood_cathedral")
         before = len(window._undo_stack)
@@ -12333,35 +12620,36 @@ class QtMaterialLayoutTests(unittest.TestCase):
         self.assertEqual(self._material(window)["layout"],
                          "herringbone")
         self.assertEqual(len(window._undo_stack), before + 1)
-        # The size rows rebuilt for herringbone, showing the
+        # The size knobs rebuilt for herringbone, showing the
         # layout's defaults.
-        self.assertEqual(set(window._layout_spins),
-                         {"board_width", "board_length"})
-        self.assertEqual(window._layout_spins["board_width"].value(),
-                         9.0)
-        self.assertEqual(window._layout_spins["board_length"].value(),
-                         54.0)
-        labels = _param_row_labels(window)
-        self.assertEqual(labels, ["Ring spacing", "Grain strength",
-                                  "Ring wobble", "Layout",
-                                  "Board width", "Board length",
-                                  "Life", "Dirt", "Grime",
-                                  "Edge wear", "Moss", "Wetness"])
+        knobs = [s.key for s in window._wheel_slices("layout")
+                 if s.kind == "knob"]
+        self.assertEqual(set(knobs),
+                         {"size_board_width", "size_board_length"})
+        dial = self._load_knob(window, "layout", "size_board_width")
+        self.assertEqual(dial.value(), 9.0)
+        dial = self._load_knob(window, "layout", "size_board_length")
+        self.assertEqual(dial.value(), 54.0)
+        self.assertEqual(_wheel_page_labels(window, "layout"),
+                         ["Solid", "Boards", "Parquet", "Chevron",
+                          "Herringbone", "Strip", "Board width",
+                          "Board length"])
         window.undo()
         self._pump()
         self.assertEqual(self._material(window)["layout"], "solid")
-        self.assertIsNotNone(window._layout_combo)
-        self.assertEqual(window._layout_spins, {})
+        self.assertEqual(_wheel_page_keys(window, "layout"),
+                         ["solid", "boards", "parquet",
+                          "chevron", "herringbone", "strip"])
         window.close()
 
     def test_style_change_resets_layout(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._advanced(window)
         self._pick_style(window, "wood_cathedral")
         self._pick_layout(window, "herringbone")
-        spin = window._layout_spins["board_width"]
-        spin.setValue(12.0)
-        spin.editingFinished.emit()
+        self._load_knob(window, "layout", "size_board_width")
+        self._dial_set(window, 12.0)
         self.assertEqual(self._material(window)["layout_size"],
                          {"board_width": 12.0})
         before = len(window._undo_stack)
@@ -12371,23 +12659,27 @@ class QtMaterialLayoutTests(unittest.TestCase):
         self.assertEqual(self._material(window)["layout"], "solid")
         self.assertEqual(self._material(window)["layout_size"], {})
         self.assertEqual(len(window._undo_stack), before + 1)
-        self.assertIsNone(window._layout_combo)
+        self.assertEqual(_wheel_page_keys(window, "layout"),
+                         ["solid"])
         # Brick defaults to stretcher, not solid.
         self._pick_style(window, "brick_stretcher")
         self.assertEqual(self._material(window)["layout"], "stretcher")
-        self.assertIsNotNone(window._layout_combo)
+        self.assertIn("flemish",
+                      _wheel_page_keys(window, "layout"))
         window.close()
 
-    def test_size_spin_edits_layout_size(self):
+    def test_size_dial_edits_layout_size(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._advanced(window)
         self._pick_style(window, "wood_cathedral")
         self._pick_layout(window, "herringbone")
         before = len(window._undo_stack)
-        spin = window._layout_spins["board_width"]
-        spin.setValue(12.0)
-        spin.setValue(15.0)
-        spin.editingFinished.emit()
+        dial = self._load_knob(window, "layout", "size_board_width")
+        dial.setValue(12.0)
+        dial.setValue(15.0)
+        dial.editingFinished.emit()
+        self._pump()
         # One undo step for the gesture, with the final value.
         self.assertEqual(len(window._undo_stack), before + 1)
         self.assertEqual(self._material(window)["layout_size"],
@@ -12395,20 +12687,22 @@ class QtMaterialLayoutTests(unittest.TestCase):
         window.undo()
         self._pump()
         self.assertEqual(self._material(window)["layout_size"], {})
-        self.assertEqual(window._layout_spins["board_width"].value(),
-                         9.0)
+        dial = self._load_knob(window, "layout", "size_board_width")
+        self.assertEqual(dial.value(), 9.0)
         window.close()
 
     def test_size_default_is_pruned(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._advanced(window)
         self._pick_style(window, "wood_cathedral")
         self._pick_layout(window, "herringbone")
         before = len(window._undo_stack)
-        spin = window._layout_spins["board_width"]
-        spin.setValue(12.0)
-        spin.setValue(9.0)  # back to the default
-        spin.editingFinished.emit()
+        dial = self._load_knob(window, "layout", "size_board_width")
+        dial.setValue(12.0)
+        dial.setValue(9.0)  # back to the default
+        dial.editingFinished.emit()
+        self._pump()
         # A gesture that ends on the default stores nothing and
         # pushes no step (T14).
         self.assertEqual(len(window._undo_stack), before)
@@ -12417,12 +12711,12 @@ class QtMaterialLayoutTests(unittest.TestCase):
 
     def test_layout_round_trips_through_save_load(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._advanced(window)
         self._pick_style(window, "wood_cathedral")
         self._pick_layout(window, "herringbone")
-        spin = window._layout_spins["board_width"]
-        spin.setValue(12.0)
-        spin.editingFinished.emit()
+        self._load_knob(window, "layout", "size_board_width")
+        self._dial_set(window, 12.0)
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "scene.json")
             scene_mod.save_scene(window.scene, path)
@@ -12438,17 +12732,17 @@ class QtMaterialLayoutTests(unittest.TestCase):
 
     def test_hover_preview_on_layout(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._advanced(window)
         self._pick_style(window, "wood_cathedral")
-        combo = window._layout_combo
         with tempfile.TemporaryDirectory() as tmp:
             before = self._render_bytes(window, tmp)
-            self._hover(window, combo, "herringbone",
+            self._hover(window, "layout", "herringbone",
                         ("mug", {"layout": "herringbone"}))
             self.assertEqual(window._viewport._material_preview,
                              ("mug", {"layout": "herringbone"}))
             self.assertNotEqual(self._render_bytes(window, tmp), before)
-            combo.hidePopup()
+            window._close_wheel()
             self._pump(rounds=4)
             self.assertIsNone(window._viewport._material_preview)
             # Byte-identical to before the hover: the stored
@@ -12461,23 +12755,23 @@ class QtMaterialLayoutTests(unittest.TestCase):
         # The spec's done-when: board width 9 cm vs 18 cm renders
         # differently.
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._advanced(window)
         self._pick_style(window, "wood_cathedral")
         self._pick_layout(window, "boards")
         with tempfile.TemporaryDirectory() as tmp:
-            spin = window._layout_spins["board_width"]
-            spin.setValue(9.0)
-            spin.editingFinished.emit()
+            self._load_knob(window, "layout", "size_board_width")
+            self._dial_set(window, 9.0)
             self._pump(rounds=4)
             first = self._render_bytes(window, tmp)
-            spin.setValue(18.0)
-            spin.editingFinished.emit()
+            self._dial_set(window, 18.0)
             self._pump(rounds=4)
             self.assertNotEqual(self._render_bytes(window, tmp), first)
         window.close()
 
     def test_brick_bond_pick_renders_differently(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._advanced(window)
         self._pick_style(window, "brick_stretcher")
         with tempfile.TemporaryDirectory() as tmp:
@@ -12488,37 +12782,20 @@ class QtMaterialLayoutTests(unittest.TestCase):
             self.assertNotEqual(self._render_bytes(window, tmp), first)
         window.close()
 
-    def test_layout_rows_fit_the_pane(self):
-        # The tallest layout set (herringbone: picker + 2 spins)
-        # fits the pane sideways: the combo's and every spin's
-        # left and right edges land inside the inspector scroll
-        # viewport (the C8 pane-fit shape).
-        window = self._open_tavern_mug()
-        self._advanced(window)
-        self._pick_style(window, "wood_cathedral")
-        self._pick_layout(window, "herringbone")
-        scroll = window._inspector_scroll
-        viewport_width = scroll.viewport().width()
-        widgets = [window._layout_combo]
-        widgets.extend(window._layout_spins.values())
-        self.assertEqual(len(widgets), 3)
-        for widget in widgets:
-            top_left = scroll.viewport().mapFromGlobal(
-                widget.mapToGlobal(widget.rect().topLeft()))
-            bottom_right = scroll.viewport().mapFromGlobal(
-                widget.mapToGlobal(widget.rect().bottomRight()))
-            self.assertGreaterEqual(top_left.x(), 0, widget)
-            self.assertLessEqual(bottom_right.x(), viewport_width,
-                                 widget)
-        window.close()
+    # RETIRED in R2: test_layout_rows_fit_the_pane. The layout
+    # picker + size spins no longer exist — the picks and size
+    # knobs live on the wheel's Layout page, a ring with no pane
+    # to fit. Wheel fit is covered by QtWheelTests
+    # (test_wheel_fits_inside_the_pane).
 
 
 @unittest.skipUnless(QT_TESTS, "Qt tests need LIGHT_ENGINE_QT_TESTS=1")
 class QtMaterialWearTests(unittest.TestCase):
-    """PO5: weather and age — the Life rows (Advanced-only, per
-    style), one undo step per gesture, the style-pick reset,
-    save/load round-trip, the UI12 hover-preview, and renders
-    that differ (plus wear at 0% rendering identically)."""
+    """PO5 (R2: the wheel's Life page) — the wear knobs
+    (Advanced-only, per style), one undo step per gesture, the
+    style-pick reset, save/load round-trip, the UI12
+    hover-preview, and renders that differ (plus wear at 0%
+    rendering identically)."""
 
     @classmethod
     def setUpClass(cls):
@@ -12550,13 +12827,38 @@ class QtMaterialWearTests(unittest.TestCase):
     def _material(self, window):
         return scene_mod.find_object(window.scene, "mug")["material"]
 
-    def _pick_style(self, window, style):
-        combo = window._texture_combo
-        combo.setCurrentIndex(combo.findData(style))
+    def _open_wheel(self, window):
+        window._open_wheel()
+        self._pump()
+        return window._wheel
+
+    def _click_slice(self, window, page, key):
+        from PySide6 import QtCore, QtTest
+        wheel = window._wheel
+        wheel.set_page(page)
+        window._sync_wheel()
+        self._pump()
+        slices = window._wheel_slices(page)
+        index = next(i for i, s in enumerate(slices) if s.key == key)
+        QtTest.QTest.mouseClick(
+            wheel.canvas, QtCore.Qt.LeftButton,
+            pos=wheel.canvas.slice_point("outer", index))
         self._pump()
 
+    def _pick_style(self, window, style):
+        self._click_slice(window, "style", style)
+
     def _advanced(self, window):
-        window._material_advanced_check.setChecked(True)
+        self._click_slice(window, "material", "advanced")
+
+    def _load_knob(self, window, page, key):
+        self._click_slice(window, page, key)
+        return window._wheel.dial
+
+    def _dial_set(self, window, value):
+        dial = window._wheel.dial
+        dial.setValue(value)
+        dial.editingFinished.emit()
         self._pump()
 
     def _render_bytes(self, window, tmp):
@@ -12565,98 +12867,102 @@ class QtMaterialWearTests(unittest.TestCase):
         with open(path, "rb") as fh:
             return fh.read()
 
-    def _hover(self, window, combo, name, expect):
-        """Hover a popup item for real (the C19 helper's shape:
+    def _hover(self, window, page, key, expect):
+        """Hover a wheel slice for real (the C19 helper's shape:
         move off the target first, then re-move until the
         preview lands, up to ~2 s)."""
         from PySide6 import QtTest
-        combo.showPopup()
-        self._pump(rounds=4)
-        view = combo.view()
-        index = combo.findData(name)
-        rect = view.visualRect(view.model().index(index, 0))
-        neutral = 0 if index != 0 else 1
-        neutral_rect = view.visualRect(
-            view.model().index(neutral, 0))
-        QtTest.QTest.mouseMove(view.viewport(), neutral_rect.center())
+        wheel = window._wheel
+        wheel.set_page(page)
+        window._sync_wheel()
+        self._pump(rounds=2)
+        slices = window._wheel_slices(page)
+        index = next(i for i, s in enumerate(slices) if s.key == key)
+        point = wheel.canvas.slice_point("outer", index)
+        QtTest.QTest.mouseMove(wheel.canvas,
+                               wheel.canvas.rect().center())
         self._pump(rounds=2)
         for _ in range(10):
-            QtTest.QTest.mouseMove(view.viewport(), rect.center())
+            QtTest.QTest.mouseMove(wheel.canvas, point)
             self._pump(rounds=2)
             if window._viewport._material_preview == expect:
                 return
 
-    def test_wear_rows_follow_the_style(self):
+    def test_wear_knobs_follow_the_style(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._advanced(window)
         # Wood: dirt, grime, edge wear, moss, wetness — no rust,
         # no cracks.
         self._pick_style(window, "wood_cathedral")
-        self.assertEqual(set(window._wear_spins),
+        self.assertEqual(set(_wheel_page_keys(window, "life")),
                          {"dirt", "grime", "edge_wear", "moss",
                           "wetness"})
         # Stone adds cracks; metal swaps moss/cracks for rust;
         # fabric takes only the three.
         self._pick_style(window, "stone_granite")
-        self.assertEqual(set(window._wear_spins),
+        self.assertEqual(set(_wheel_page_keys(window, "life")),
                          {"dirt", "grime", "edge_wear", "moss",
                           "cracks", "wetness"})
-        self.assertEqual(window._wear_spins["cracks"].maximum(), 40.0)
+        dial = self._load_knob(window, "life", "cracks")
+        self.assertEqual(dial.maximum(), 40.0)
         self._pick_style(window, "metal_brushed")
-        self.assertEqual(set(window._wear_spins),
+        self.assertEqual(set(_wheel_page_keys(window, "life")),
                          {"dirt", "grime", "edge_wear", "rust",
                           "wetness"})
         self._pick_style(window, "fabric_canvas")
-        self.assertEqual(set(window._wear_spins),
+        self.assertEqual(set(_wheel_page_keys(window, "life")),
                          {"dirt", "grime", "wetness"})
         # A style-less material takes the generic set — wear
         # overlays any material, even a plain colour.
         self._pick_style(window, "none")
-        self.assertEqual(set(window._wear_spins),
+        self.assertEqual(set(_wheel_page_keys(window, "life")),
                          {"dirt", "grime", "edge_wear", "moss",
                           "wetness"})
-        # The Life label sits above the rows, after the knobs
-        # and the layout rows.
+        # The wood Life page, in order.
         self._pick_style(window, "wood_cathedral")
-        self.assertEqual(_param_row_labels(window),
-                         ["Ring spacing", "Grain strength",
-                          "Ring wobble", "Layout", "Life",
-                          "Dirt", "Grime", "Edge wear",
+        self.assertEqual(_wheel_page_labels(window, "life"),
+                         ["Dirt", "Grime", "Edge wear",
                           "Moss", "Wetness"])
         window.close()
 
-    def test_wear_rows_are_advanced_only(self):
+    def test_wear_knobs_are_advanced_only(self):
         window = self._open_tavern_mug()
-        # Simple shows no wear rows, even for a style with wear.
+        self._open_wheel(window)
+        # Simple shows no wear knobs, even for a style with
+        # wear — just the note pointing at Advanced.
         self._pick_style(window, "wood_cathedral")
-        self.assertEqual(window._wear_spins, {})
+        self.assertEqual(_wheel_page_keys(window, "life"), [])
+        self.assertIn("Advanced",
+                      window._wheel_model["life"][1])
         window.close()
 
-    def test_wear_spin_stores_and_prunes(self):
+    def test_wear_dial_stores_and_prunes(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._advanced(window)
         self._pick_style(window, "wood_cathedral")
-        spin = window._wear_spins["dirt"]
-        spin.setValue(50.0)
-        spin.editingFinished.emit()
+        self._load_knob(window, "life", "dirt")
+        self._dial_set(window, 50.0)
         self.assertEqual(self._material(window)["wear"],
                          {"dirt": 50.0})
         # Back to 0: the override is pruned, not stored.
-        spin.setValue(0.0)
-        spin.editingFinished.emit()
+        self._dial_set(window, 0.0)
         self.assertEqual(self._material(window)["wear"], {})
         window.close()
 
     def test_wear_gesture_is_one_undo_step(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._advanced(window)
         self._pick_style(window, "wood_cathedral")
         before = len(window._undo_stack)
-        spin = window._wear_spins["dirt"]
-        spin.setValue(10.0)
-        spin.setValue(30.0)
-        spin.setValue(60.0)
-        spin.editingFinished.emit()
+        dial = self._load_knob(window, "life", "dirt")
+        dial.setValue(10.0)
+        dial.setValue(30.0)
+        dial.setValue(60.0)
+        dial.editingFinished.emit()
+        self._pump()
         # One undo step for the gesture, with the final value.
         self.assertEqual(len(window._undo_stack), before + 1)
         self.assertEqual(self._material(window)["wear"],
@@ -12664,18 +12970,21 @@ class QtMaterialWearTests(unittest.TestCase):
         window.undo()
         self._pump()
         self.assertEqual(self._material(window)["wear"], {})
-        self.assertEqual(window._wear_spins["dirt"].value(), 0.0)
+        dial = self._load_knob(window, "life", "dirt")
+        self.assertEqual(dial.value(), 0.0)
         window.close()
 
     def test_wear_default_gesture_pushes_no_step(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._advanced(window)
         self._pick_style(window, "wood_cathedral")
         before = len(window._undo_stack)
-        spin = window._wear_spins["dirt"]
-        spin.setValue(40.0)
-        spin.setValue(0.0)  # back to the default
-        spin.editingFinished.emit()
+        dial = self._load_knob(window, "life", "dirt")
+        dial.setValue(40.0)
+        dial.setValue(0.0)  # back to the default
+        dial.editingFinished.emit()
+        self._pump()
         # A gesture that ends at the default stores nothing and
         # pushes no step (T14).
         self.assertEqual(len(window._undo_stack), before)
@@ -12684,11 +12993,11 @@ class QtMaterialWearTests(unittest.TestCase):
 
     def test_style_change_resets_wear(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._advanced(window)
         self._pick_style(window, "metal_brushed")
-        spin = window._wear_spins["rust"]
-        spin.setValue(80.0)
-        spin.editingFinished.emit()
+        self._load_knob(window, "life", "rust")
+        self._dial_set(window, 80.0)
         self.assertEqual(self._material(window)["wear"],
                          {"rust": 80.0})
         before = len(window._undo_stack)
@@ -12697,16 +13006,16 @@ class QtMaterialWearTests(unittest.TestCase):
         self._pick_style(window, "wood_cathedral")
         self.assertEqual(self._material(window)["wear"], {})
         self.assertEqual(len(window._undo_stack), before + 1)
-        self.assertNotIn("rust", window._wear_spins)
+        self.assertNotIn("rust", _wheel_page_keys(window, "life"))
         window.close()
 
     def test_wear_round_trips_through_save_load(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._advanced(window)
         self._pick_style(window, "wood_cathedral")
-        spin = window._wear_spins["dirt"]
-        spin.setValue(50.0)
-        spin.editingFinished.emit()
+        self._load_knob(window, "life", "dirt")
+        self._dial_set(window, 50.0)
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "scene.json")
             scene_mod.save_scene(window.scene, path)
@@ -12721,15 +13030,14 @@ class QtMaterialWearTests(unittest.TestCase):
 
     def test_hover_preview_pins_wear(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._advanced(window)
         self._pick_style(window, "wood_cathedral")
-        spin = window._wear_spins["dirt"]
-        spin.setValue(50.0)
-        spin.editingFinished.emit()
-        combo = window._texture_combo
+        self._load_knob(window, "life", "dirt")
+        self._dial_set(window, 50.0)
         with tempfile.TemporaryDirectory() as tmp:
             before = self._render_bytes(window, tmp)
-            self._hover(window, combo, "brick_stretcher",
+            self._hover(window, "style", "brick_stretcher",
                         ("mug", {"texture": "brick_stretcher",
                                  "style": "brick_stretcher",
                                  "params": {}, "wear": {}, "base_color": "#9a4a32", "roughness": 0.95, "metalness": 0.0}))
@@ -12739,7 +13047,7 @@ class QtMaterialWearTests(unittest.TestCase):
                                       "params": {}, "wear": {}, "base_color": "#9a4a32", "roughness": 0.95, "metalness": 0.0}))
             self.assertNotEqual(self._render_bytes(window, tmp),
                                 before)
-            combo.hidePopup()
+            window._close_wheel()
             self._pump(rounds=4)
             self.assertIsNone(window._viewport._material_preview)
             # Byte-identical to before the hover: the stored
@@ -12753,13 +13061,13 @@ class QtMaterialWearTests(unittest.TestCase):
         # The spec's done-when: dirt 100% vs 0% renders
         # differently (the brightness shift is verify_po5's).
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._advanced(window)
         self._pick_style(window, "wood_cathedral")
         with tempfile.TemporaryDirectory() as tmp:
             first = self._render_bytes(window, tmp)
-            spin = window._wear_spins["dirt"]
-            spin.setValue(100.0)
-            spin.editingFinished.emit()
+            self._load_knob(window, "life", "dirt")
+            self._dial_set(window, 100.0)
             self._pump(rounds=4)
             self.assertNotEqual(self._render_bytes(window, tmp),
                                 first)
@@ -12799,6 +13107,7 @@ class QtMaterialWearTests(unittest.TestCase):
         # wear value stored as 0 renders byte-identically to
         # the same material with no wear key at all.
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         self._advanced(window)
         self._pick_style(window, "wood_cathedral")
         mat = self._material(window)
@@ -12812,334 +13121,26 @@ class QtMaterialWearTests(unittest.TestCase):
             self.assertEqual(self._render_bytes(window, tmp), first)
         window.close()
 
-    def test_wear_rows_fit_the_pane(self):
-        # The tallest wear set (stone: 6 rows) fits the pane
-        # sideways: every spin's left and right edges land
-        # inside the inspector scroll viewport (the C8 pane-fit
-        # shape).
-        window = self._open_tavern_mug()
-        self._advanced(window)
-        self._pick_style(window, "stone_granite")
-        scroll = window._inspector_scroll
-        viewport_width = scroll.viewport().width()
-        widgets = list(window._wear_spins.values())
-        self.assertEqual(len(widgets), 6)
-        for widget in widgets:
-            top_left = scroll.viewport().mapFromGlobal(
-                widget.mapToGlobal(widget.rect().topLeft()))
-            bottom_right = scroll.viewport().mapFromGlobal(
-                widget.mapToGlobal(widget.rect().bottomRight()))
-            self.assertGreaterEqual(top_left.x(), 0, widget)
-            self.assertLessEqual(bottom_right.x(), viewport_width,
-                                 widget)
-        window.close()
+    # RETIRED in R2: test_wear_rows_fit_the_pane. The wear
+    # spins no longer exist — the wear knobs live on the
+    # wheel's Life page, a ring with no pane to fit. Wheel
+    # fit is covered by QtWheelTests
+    # (test_wheel_fits_inside_the_pane).
 
 
-@unittest.skipUnless(QT_TESTS, "Qt tests need LIGHT_ENGINE_QT_TESTS=1")
-class QtPieMenuTests(unittest.TestCase):
-    """UI9: the pie menu in the viewport — Q opens it at the cursor,
-    a click or a flick or a number key picks, arrow keys navigate,
-    Esc / Q / a click outside dismisses without picking, and a
-    no-pick close changes no pixel and no undo step."""
-
-    @classmethod
-    def setUpClass(cls):
-        from PySide6 import QtWidgets
-        cls._app = QtWidgets.QApplication.instance()
-        if cls._app is None:
-            cls._app = QtWidgets.QApplication([])
-        from light_engine import window as window_mod
-        from light_engine.viewport import PieMenu, PieSlice
-        cls.MainWindow = window_mod.MainWindow
-        cls.PieMenu = PieMenu
-        cls.PieSlice = PieSlice
-
-    def setUp(self):
-        # The appear animation never runs in tests — the menu is at
-        # full scale the moment it opens.
-        style_mod.set_reduced_motion_override(True)
-
-    def tearDown(self):
-        style_mod.set_reduced_motion_override(None)
-
-    def _pump(self, rounds=10):
-        from PySide6 import QtCore, QtWidgets
-        for _ in range(rounds):
-            QtWidgets.QApplication.processEvents()
-            QtCore.QThread.msleep(50)
-
-    def _show(self, window):
-        window.resize(1280, 800)
-        window.show()
-        self._pump()
-
-    def _open_window(self, scene=None):
-        window = self.MainWindow(scene=scene)
-        self._show(window)
-        return window
-
-    def _open_tavern(self):
-        scene = scene_mod.load_scene(str(EXAMPLE))
-        return self._open_window(scene=scene)
-
-    def _cursor_to(self, widget, point):
-        # QTest.mouseMove is a no-op when the pointer is already at
-        # the target — move away first (the C19 helper's shape).
-        from PySide6 import QtCore, QtTest
-        QtTest.QTest.mouseMove(widget, QtCore.QPoint(5, 5))
-        self._pump(rounds=2)
-        QtTest.QTest.mouseMove(widget, point)
-        self._pump(rounds=2)
-
-    def _focus_viewport(self, window):
-        # Xvfb has no window manager, so show() never activates the
-        # window and setFocus() is a no-op until it is active (the
-        # C3 shortcut test's pattern).
-        window.activateWindow()
-        window._viewport.setFocus()
-        self._pump(rounds=5)
-
-    def _open_pie(self, window, at=None):
-        from PySide6 import QtCore
-        vp = window._viewport
-        if at is None:
-            at = QtCore.QPoint(vp.width() // 2, vp.height() // 2)
-        self._cursor_to(vp, at)
-        self._focus_viewport(window)
-        window._open_pie_menu()
-        self._pump(rounds=4)
-        return window._pie_menu
-
-    def _render_bytes(self, window, tmp):
-        path = os.path.join(tmp, "frame.png")
-        window.render_frame_to(0, path)
-        with open(path, "rb") as fh:
-            return fh.read()
-
-    def test_nine_slices_rejected_and_eight_allowed(self):
-        # Entry 016's cap, enforced at construction: past eight
-        # slices the flick becomes a hunt again.
-        PieMenu = self.PieMenu
-        PieSlice = self.PieSlice
-        with self.assertRaises(ValueError):
-            PieMenu([PieSlice(str(i)) for i in range(9)])
-        with self.assertRaises(ValueError):
-            PieMenu([])
-        menu = PieMenu([PieSlice(str(i)) for i in range(8)])
-        self.assertEqual(len(menu._slices), 8)
-        menu.close()
-
-    def test_slice_points_cover_the_compass(self):
-        # Every slice point maps back to its own index; the centre
-        # (dead zone) and a corner map to no slice.
-        from PySide6 import QtCore
-        menu = self.PieMenu([self.PieSlice(str(i))
-                             for i in range(8)])
-        for i in range(8):
-            self.assertEqual(menu._slice_at(menu.slice_point(i)), i)
-        self.assertIsNone(menu._slice_at(menu.rect().center()))
-        self.assertIsNone(menu._slice_at(QtCore.QPoint(0, 0)))
-        menu.close()
-
-    def test_q_opens_menu_at_cursor(self):
-        from PySide6 import QtCore, QtGui
-        from PySide6.QtTest import QTest
-        window = self._open_window()
-        vp = window._viewport
-        self._cursor_to(vp, QtCore.QPoint(vp.width() // 2,
-                                          vp.height() // 2))
-        self._focus_viewport(window)
-        QTest.keyClick(vp, QtCore.Qt.Key_Q)
-        self._pump(rounds=4)
-        menu = window._pie_menu
-        self.assertIsNotNone(menu)
-        self.assertTrue(menu.isVisible())
-        # Centred on the cursor (within a pixel of integer
-        # rounding), fully inside the viewport.
-        cursor = QtGui.QCursor.pos()
-        centre = menu.mapToGlobal(menu.rect().center())
-        self.assertLessEqual(abs(centre.x() - cursor.x()), 1)
-        self.assertLessEqual(abs(centre.y() - cursor.y()), 1)
-        vp_rect = QtCore.QRect(vp.mapToGlobal(QtCore.QPoint(0, 0)),
-                               vp.size())
-        self.assertTrue(vp_rect.contains(menu.geometry()))
-        window.close()
-
-    def test_click_picks_gizmo_mode(self):
-        from PySide6 import QtCore
-        from PySide6.QtTest import QTest
-        window = self._open_window()
-        menu = self._open_pie(window)
-        # Slice 1 is Rotate; the pick runs the toolbar's own code
-        # path, so the button reflects it too.
-        QTest.mouseClick(menu, QtCore.Qt.LeftButton,
-                         pos=menu.slice_point(1))
-        self._pump(rounds=4)
-        self.assertFalse(menu.isVisible())
-        self.assertEqual(window._viewport.gizmo_mode, "rotate")
-        self.assertTrue(window._gizmo_buttons["rotate"].isChecked())
-        window.close()
-
-    def test_flick_picks(self):
-        # Press in the dead zone (where the menu opened, under the
-        # cursor), drag out to the Box slice, release: the release
-        # point picks.
-        from PySide6 import QtCore
-        from PySide6.QtTest import QTest
-        window = self._open_window()
-        before = len(window.scene["objects"])
-        undo_before = len(window._undo_stack)
-        menu = self._open_pie(window)
-        QTest.mousePress(menu, QtCore.Qt.LeftButton,
-                         pos=menu.rect().center())
-        QTest.mouseMove(menu, menu.slice_point(3))
-        QTest.mouseRelease(menu, QtCore.Qt.LeftButton,
-                           pos=menu.slice_point(3))
-        self._pump(rounds=4)
-        self.assertFalse(menu.isVisible())
-        self.assertEqual(len(window.scene["objects"]), before + 1)
-        self.assertEqual(window.scene["objects"][-1]["shape"], "box")
-        self.assertEqual(len(window._undo_stack), undo_before + 1)
-        window.close()
-
-    def test_number_key_picks(self):
-        # Key 5 is the fifth slice (Sphere); a pick adds the object
-        # through the Add panel's own code path, one undo step.
-        from PySide6 import QtCore
-        from PySide6.QtTest import QTest
-        window = self._open_window()
-        before = len(window.scene["objects"])
-        undo_before = len(window._undo_stack)
-        menu = self._open_pie(window)
-        QTest.keyClick(menu, QtCore.Qt.Key_5)
-        self._pump(rounds=4)
-        self.assertFalse(menu.isVisible())
-        self.assertEqual(len(window.scene["objects"]), before + 1)
-        self.assertEqual(window.scene["objects"][-1]["shape"],
-                         "sphere")
-        self.assertEqual(window.scene["objects"][-1]["id"],
-                         window.selected_id)
-        self.assertEqual(len(window._undo_stack), undo_before + 1)
-        window.close()
-
-    def test_escape_closes_without_pick(self):
-        from PySide6 import QtCore
-        from PySide6.QtTest import QTest
-        window = self._open_tavern()
-        before = scene_mod.scene_copy(window.scene)
-        undo_before = len(window._undo_stack)
-        menu = self._open_pie(window)
-        QTest.keyClick(menu, QtCore.Qt.Key_Escape)
-        self._pump(rounds=4)
-        self.assertFalse(menu.isVisible())
-        self.assertEqual(window.scene, before)
-        self.assertEqual(len(window._undo_stack), undo_before)
-        window.close()
-
-    def test_q_again_closes_without_pick(self):
-        from PySide6 import QtCore
-        from PySide6.QtTest import QTest
-        window = self._open_tavern()
-        before = scene_mod.scene_copy(window.scene)
-        menu = self._open_pie(window)
-        QTest.keyClick(menu, QtCore.Qt.Key_Q)
-        self._pump(rounds=4)
-        self.assertFalse(menu.isVisible())
-        self.assertEqual(window.scene, before)
-        window.close()
-
-    def test_click_outside_closes_without_pick(self):
-        # The dismissing click is swallowed: the viewport never
-        # sees it, so no orbit starts and no selection changes.
-        from PySide6 import QtCore
-        from PySide6.QtTest import QTest
-        window = self._open_tavern()
-        window._select("mug")
-        before = scene_mod.scene_copy(window.scene)
-        undo_before = len(window._undo_stack)
-        menu = self._open_pie(window)
-        self.assertTrue(menu.isVisible())
-        QTest.mouseClick(window._viewport, QtCore.Qt.LeftButton,
-                         pos=QtCore.QPoint(10, 10))
-        self._pump(rounds=4)
-        self.assertFalse(menu.isVisible())
-        self.assertEqual(window.scene, before)
-        self.assertEqual(len(window._undo_stack), undo_before)
-        self.assertEqual(window.selected_id, "mug")
-        window.close()
-
-    def test_no_pick_close_changes_no_pixel(self):
-        # Open + Esc: the render is byte-identical, the camera is
-        # untouched, and the undo stack is untouched.
-        window = self._open_tavern()
-        vp = window._viewport
-        camera = (vp.target, vp.distance, vp.azimuth, vp.elevation)
-        undo_before = len(window._undo_stack)
-        with tempfile.TemporaryDirectory() as tmp:
-            first = self._render_bytes(window, tmp)
-            menu = self._open_pie(window)
-            from PySide6 import QtCore
-            from PySide6.QtTest import QTest
-            QTest.keyClick(menu, QtCore.Qt.Key_Escape)
-            self._pump(rounds=4)
-            self.assertEqual(self._render_bytes(window, tmp), first)
-        self.assertEqual((vp.target, vp.distance, vp.azimuth,
-                          vp.elevation), camera)
-        self.assertEqual(len(window._undo_stack), undo_before)
-        window.close()
-
-    def test_menu_clamps_to_viewport(self):
-        # Cursor in the viewport's top-left corner: the menu still
-        # lands fully inside the viewport, not half off the edge.
-        from PySide6 import QtCore
-        window = self._open_window()
-        vp = window._viewport
-        menu = self._open_pie(window, at=QtCore.QPoint(5, 5))
-        vp_rect = QtCore.QRect(vp.mapToGlobal(QtCore.QPoint(0, 0)),
-                               vp.size())
-        self.assertTrue(vp_rect.contains(menu.geometry()))
-        menu.close()
-        window.close()
-
-    def test_arrow_keys_navigate_and_enter_picks(self):
-        from PySide6 import QtCore
-        from PySide6.QtTest import QTest
-        window = self._open_window()
-        menu = self._open_pie(window)
-        QTest.keyClick(menu, QtCore.Qt.Key_Right)
-        self.assertEqual(menu._hover, 0)
-        QTest.keyClick(menu, QtCore.Qt.Key_Right)
-        self.assertEqual(menu._hover, 1)
-        QTest.keyClick(menu, QtCore.Qt.Key_Return)
-        self._pump(rounds=4)
-        self.assertFalse(menu.isVisible())
-        self.assertEqual(window._viewport.gizmo_mode, "rotate")
-        window.close()
-
-    def test_reduced_motion_opens_at_full_scale(self):
-        # With reduced motion on (setUp forces it), there is no
-        # appear animation: full scale the moment it opens.
-        window = self._open_window()
-        menu = self._open_pie(window)
-        self.assertEqual(menu._scale, 1.0)
-        self.assertIsNone(menu._anim)
-        menu.close()
-        window.close()
-
-    def test_shortcuts_work_after_close(self):
-        # Focus returns to the viewport on dismiss, so W/E/R keep
-        # working without the user clicking back into the viewport.
-        from PySide6 import QtCore
-        from PySide6.QtTest import QTest
-        window = self._open_window()
-        vp = window._viewport
-        menu = self._open_pie(window)
-        QTest.keyClick(menu, QtCore.Qt.Key_Escape)
-        self._pump(rounds=4)
-        self.assertFalse(menu.isVisible())
-        QTest.keyClick(vp, QtCore.Qt.Key_E)
-        self.assertEqual(vp.gizmo_mode, "rotate")
-        window.close()
+# RETIRED in R2: QtPieMenuTests (C25). The PieMenu is gone —
+# the wheel replaces it. Behaviors with a wheel equivalent
+# live on in QtWheelTests (C30): Q opens, Esc / Q-again /
+# click-outside close, a no-pick close changes no pixel and
+# no undo step, clamps to the pane, arrow keys + Enter,
+# shortcuts work after close. Retired without an equivalent:
+# the 8-slice cap test (the cap was removed by design —
+# no caps without Joshua's say-so), flick picks and
+# number-key picks (the wheel is a docked panel, not a flick
+# menu), gizmo-mode picks (gizmo/Add remain via the toolbar,
+# the Add panel, and W/E/R), and the reduced-motion appear
+# animation (the wheel has no appear animation). The C25
+# slot stays vacant; later groups are not renumbered.
 
 
 @unittest.skipUnless(QT_TESTS, "Qt tests need LIGHT_ENGINE_QT_TESTS=1")
@@ -13555,23 +13556,42 @@ class QtFColorTests(unittest.TestCase):
                    / len(values)) ** 0.5
             self.assertGreater(std, 0.04, key)
 
+    def _open_wheel(self, window):
+        window._open_wheel()
+        self._pump()
+        return window._wheel
+
+    def _click_slice(self, window, page, key):
+        from PySide6 import QtCore, QtTest
+        wheel = window._wheel
+        wheel.set_page(page)
+        window._sync_wheel()
+        self._pump()
+        slices = window._wheel_slices(page)
+        index = next(i for i, s in enumerate(slices) if s.key == key)
+        QtTest.QTest.mouseClick(
+            wheel.canvas, QtCore.Qt.LeftButton,
+            pos=wheel.canvas.slice_point("outer", index))
+        self._pump()
+
     def test_style_pick_applies_look_in_one_undo_step(self):
         window = self._open_tavern_mug()
+        self._open_wheel(window)
         mug = scene_mod.find_object(window.scene, "mug")
         before = dict(mug["material"])
-        combo = window._texture_combo
-        combo.setCurrentIndex(combo.findData("wood_cathedral"))
-        self._pump(rounds=2)
+        self._click_slice(window, "style", "wood_cathedral")
         mat = mug["material"]
         self.assertEqual(mat["style"], "wood_cathedral")
         self.assertEqual(mat["base_color"], "#8a5a2b")
         self.assertEqual(mat["roughness"], 0.7)
         self.assertEqual(mat["metalness"], 0.0)
-        # The inspector shows the new look at once.
+        # The summary + the wheel show the new look at once.
         self.assertIn("#8a5a2b",
-                      window._color_swatch.styleSheet())
-        self.assertEqual(window._roughness_slider.value(), 70)
-        self.assertEqual(window._metalness_slider.value(), 0)
+                      window._material_swatch.styleSheet())
+        self._click_slice(window, "material", "roughness")
+        self.assertEqual(window._wheel.dial.value(), 0.7)
+        self._click_slice(window, "material", "metalness")
+        self.assertEqual(window._wheel.dial.value(), 0.0)
         # One undo step restores the whole pick, look included.
         # Undo swaps the whole scene, so the mug is re-found —
         # the old reference points at the pre-undo object.
@@ -13581,17 +13601,16 @@ class QtFColorTests(unittest.TestCase):
         self.assertEqual(mug["material"], before)
         # Picking "none" leaves the look alone: a plain color is
         # the user's own choice, not a style's.
-        combo.setCurrentIndex(combo.findData("none"))
-        self._pump(rounds=2)
+        self._click_slice(window, "style", "none")
         self.assertEqual(mug["material"]["style"], "none")
         self.assertEqual(mug["material"]["base_color"], "#7a4a8a")
         window.close()
 
     def test_hover_preview_shows_style_color(self):
         window = self._open_tavern_mug()
-        combo = window._texture_combo
-        index = combo.findData("wood_cathedral")
-        window._on_texture_highlighted(index)
+        # The preview call the wheel's hover drives (the real
+        # hover path is proven in C19).
+        window._preview_style("wood_cathedral")
         self.assertEqual(window._viewport._material_preview,
                          ("mug", {"texture": "wood_cathedral",
                                   "style": "wood_cathedral",
@@ -13605,7 +13624,7 @@ class QtFColorTests(unittest.TestCase):
         self.assertEqual(len(window._undo_stack), 0)
         # Hovering "none" previews no look: the stored color
         # shows with no pattern.
-        window._on_texture_highlighted(combo.findData("none"))
+        window._preview_style("none")
         self.assertEqual(window._viewport._material_preview,
                          ("mug", {"texture": "none", "style": "none",
                                   "params": {}, "wear": {}}))
@@ -13993,17 +14012,17 @@ def _fake_urlopen(mapping):
     return opener
 
 
-def _release_payload(tag="v0.2-r2", with_sha=True, with_zip=True):
+def _release_payload(tag="v0.2-pkl", with_sha=True, with_zip=True):
     """A GitHub releases/latest payload for one tag."""
     assets = []
     if with_zip:
         assets.append({
-            "name": "REBLEND-v0.2-r2-RELEASE.zip",
+            "name": "REBLEND-v0.2-pkl-RELEASE.zip",
             "browser_download_url":
                 "https://example.invalid/REBLEND.zip"})
     if with_sha:
         assets.append({
-            "name": "REBLEND-v0.2-r2-RELEASE.zip.sha256",
+            "name": "REBLEND-v0.2-pkl-RELEASE.zip.sha256",
             "browser_download_url":
                 "https://example.invalid/REBLEND.zip.sha256"})
     return {"tag_name": tag,
@@ -14017,7 +14036,7 @@ class UpdaterTests(unittest.TestCase):
     apply, restart. Headless, no network: every URL goes
     through _fake_urlopen, every app folder is a temp dir."""
 
-    def _release(self, tag="v0.2-r2", with_sha=True):
+    def _release(self, tag="v0.2-pkl", with_sha=True):
         payload = _release_payload(tag=tag, with_sha=with_sha)
         urlopen = _fake_urlopen({
             updater_mod.LATEST_RELEASE_URL:
@@ -14051,7 +14070,7 @@ class UpdaterTests(unittest.TestCase):
                 archive.writestr(name, data)
         return zip_path
 
-    def _stage(self, tmp, app=None, tag="v0.2-r2"):
+    def _stage(self, tmp, app=None, tag="v0.2-pkl"):
         """Stage a good update into a temp app dir and return
         (app, staging)."""
         app = app or self._app_dir(tmp)
@@ -14075,27 +14094,27 @@ class UpdaterTests(unittest.TestCase):
         from light_engine import __version__
         self.assertEqual(updater_mod.current_tag(),
                          "v" + __version__)
-        # Pinned: this tree ships as v0.2-upd, so the updater
+        # Pinned: this tree ships as v0.2-r2, so the updater
         # must say so — a stale version would offer the app
         # its own release forever.
-        self.assertEqual(updater_mod.current_tag(), "v0.2-upd")
+        self.assertEqual(updater_mod.current_tag(), "v0.2-r2")
 
     def test_check_same_tag_is_current(self):
-        payload = _release_payload(tag="v0.2-upd")
+        payload = _release_payload(tag="v0.2-r2")
         urlopen = _fake_urlopen({
             updater_mod.LATEST_RELEASE_URL:
                 json.dumps(payload).encode("utf-8")})
         result = updater_mod.check_for_update(urlopen=urlopen)
         self.assertEqual(result["state"], "current")
-        self.assertEqual(result["latest"], "v0.2-upd")
+        self.assertEqual(result["latest"], "v0.2-r2")
 
     def test_check_different_tag_is_newer(self):
         result = updater_mod.check_for_update(
             urlopen=_fake_urlopen({
                 updater_mod.LATEST_RELEASE_URL: json.dumps(
-                    _release_payload(tag="v0.2-r2")).encode()}))
+                    _release_payload(tag="v0.2-pkl")).encode()}))
         self.assertEqual(result["state"], "newer")
-        self.assertEqual(result["latest"], "v0.2-r2")
+        self.assertEqual(result["latest"], "v0.2-pkl")
         self.assertEqual(result["release"]["zip_url"],
                          "https://example.invalid/REBLEND.zip")
         self.assertIsNotNone(result["release"]["sha_url"])
@@ -14164,10 +14183,10 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(result["state"], "newer")
 
     def test_asset_pick_prefers_release_zip(self):
-        payload = {"tag_name": "v0.2-r2", "assets": [
+        payload = {"tag_name": "v0.2-pkl", "assets": [
             {"name": "something-else.zip",
              "browser_download_url": "https://example.invalid/a"},
-            {"name": "REBLEND-v0.2-r2-RELEASE.zip",
+            {"name": "REBLEND-v0.2-pkl-RELEASE.zip",
              "browser_download_url": "https://example.invalid/b"}]}
         zip_asset, _sha = updater_mod._pick_assets(payload)
         self.assertEqual(zip_asset[1], "https://example.invalid/b")
@@ -14246,7 +14265,7 @@ class UpdaterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             app, staging = self._stage(tmp)
             pending = updater_mod.pending_update(app)
-            self.assertEqual(pending["tag"], "v0.2-r2")
+            self.assertEqual(pending["tag"], "v0.2-pkl")
             self.assertTrue((staging / "update.zip").exists())
             # No temp files left behind.
             self.assertFalse(
@@ -14256,7 +14275,7 @@ class UpdaterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             app = self._app_dir(tmp)
             zip_path = self._update_zip(tmp)
-            release = {"tag": "v0.2-r2",
+            release = {"tag": "v0.2-pkl",
                        "zip_url": "https://example.invalid/u.zip",
                        "zip_name": "REBLEND.zip",
                        "sha_url":
@@ -14278,7 +14297,7 @@ class UpdaterTests(unittest.TestCase):
     def test_stage_missing_sidecar_refuses(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = self._app_dir(tmp)
-            release = {"tag": "v0.2-r2",
+            release = {"tag": "v0.2-pkl",
                        "zip_url": "https://example.invalid/u.zip",
                        "zip_name": "REBLEND.zip",
                        "sha_url": None, "sha_name": None,
@@ -14294,7 +14313,7 @@ class UpdaterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             app = self._app_dir(tmp)
             zip_path = self._update_zip(tmp)
-            release = {"tag": "v0.2-r2",
+            release = {"tag": "v0.2-pkl",
                        "zip_url": "https://example.invalid/u.zip",
                        "zip_name": "REBLEND.zip",
                        "sha_url":
@@ -14312,7 +14331,7 @@ class UpdaterTests(unittest.TestCase):
     def test_stage_download_failure_leaves_no_pending(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = self._app_dir(tmp)
-            release = {"tag": "v0.2-r2",
+            release = {"tag": "v0.2-pkl",
                        "zip_url": "https://example.invalid/u.zip",
                        "zip_name": "REBLEND.zip",
                        "sha_url":
@@ -14332,12 +14351,12 @@ class UpdaterTests(unittest.TestCase):
             app, staging = self._stage(tmp)
             result = updater_mod.apply_pending_update(app)
             self.assertTrue(result["applied"])
-            self.assertEqual(result["tag"], "v0.2-r2")
+            self.assertEqual(result["tag"], "v0.2-pkl")
             self.assertEqual((app / "main.py").read_text(), "NEW\n")
             self.assertEqual((app / "newfile.txt").read_text(),
                              "new\n")
             self.assertFalse(staging.exists())
-            self.assertIn("v0.2-r2",
+            self.assertIn("v0.2-pkl",
                           (app / "update.log").read_text())
             # A second apply finds nothing pending.
             result = updater_mod.apply_pending_update(app)
@@ -14380,7 +14399,7 @@ class UpdaterTests(unittest.TestCase):
             (staging / "update.zip").write_bytes(
                 zip_path.read_bytes())
             (staging / "pending.json").write_text(json.dumps(
-                {"tag": "v0.2-r2", "sha256": digest,
+                {"tag": "v0.2-pkl", "sha256": digest,
                  "zip_name": "update.zip"}))
             result = updater_mod.apply_pending_update(app)
             self.assertFalse(result["applied"])
@@ -14399,7 +14418,7 @@ class UpdaterTests(unittest.TestCase):
             (staging / "update.zip").write_bytes(
                 zip_path.read_bytes())
             (staging / "pending.json").write_text(json.dumps(
-                {"tag": "v0.2-r2", "sha256": digest,
+                {"tag": "v0.2-pkl", "sha256": digest,
                  "zip_name": "update.zip"}))
             result = updater_mod.apply_pending_update(app)
             self.assertTrue(result["applied"])
@@ -14424,7 +14443,7 @@ class UpdaterTests(unittest.TestCase):
             (staging / "update.zip").write_bytes(
                 zip_path.read_bytes())
             (staging / "pending.json").write_text(json.dumps(
-                {"tag": "v0.2-r2", "sha256": digest,
+                {"tag": "v0.2-pkl", "sha256": digest,
                  "zip_name": "update.zip"}))
             result = updater_mod.apply_pending_update(app)
             self.assertTrue(result["applied"])
@@ -14450,7 +14469,7 @@ class UpdaterTests(unittest.TestCase):
             (staging / "pending.json").write_text("not json{")
             self.assertIsNone(updater_mod.pending_update(app))
             (staging / "pending.json").write_text(
-                json.dumps({"tag": "v0.2-r2"}))
+                json.dumps({"tag": "v0.2-pkl"}))
             self.assertIsNone(updater_mod.pending_update(app))
 
     def test_staging_dir_is_sibling(self):
@@ -14564,7 +14583,7 @@ class QtUpdaterTests(unittest.TestCase):
             QtWidgets.QApplication.processEvents()
             QtCore.QThread.msleep(50)
 
-    def _release(self, tag="v0.2-r2", with_sha=True):
+    def _release(self, tag="v0.2-pkl", with_sha=True):
         return {"tag": tag,
                 "zip_url": "https://example.invalid/u.zip",
                 "zip_name": "REBLEND.zip",
@@ -14614,15 +14633,15 @@ class QtUpdaterTests(unittest.TestCase):
 
     def test_manual_check_current_shows_up_to_date(self):
         def check():
-            return {"state": "current", "latest": "v0.2-upd",
-                    "release": self._release(tag="v0.2-upd")}
+            return {"state": "current", "latest": "v0.2-r2",
+                    "release": self._release(tag="v0.2-r2")}
 
         self._window._start_update_check(manual=True,
                                          check_fn=check)
         self._wait_for_check()
         self.assertEqual(len(self._infos), 1)
         self.assertIn("up to date", self._infos[0][0])
-        self.assertIn("v0.2-upd", self._infos[0][1])
+        self.assertIn("v0.2-r2", self._infos[0][1])
         self.assertEqual(self._questions, [])
         self.assertEqual(self._warnings, [])
 
@@ -14642,8 +14661,8 @@ class QtUpdaterTests(unittest.TestCase):
 
     def test_automatic_check_current_is_silent(self):
         def check():
-            return {"state": "current", "latest": "v0.2-upd",
-                    "release": self._release(tag="v0.2-upd")}
+            return {"state": "current", "latest": "v0.2-r2",
+                    "release": self._release(tag="v0.2-r2")}
 
         self._window._start_update_check(manual=False,
                                          check_fn=check)
@@ -14672,14 +14691,14 @@ class QtUpdaterTests(unittest.TestCase):
             started.append(True))
 
         def check():
-            return {"state": "newer", "latest": "v0.2-r2",
+            return {"state": "newer", "latest": "v0.2-pkl",
                     "release": self._release()}
 
         self._window._start_update_check(manual=False,
                                          check_fn=check)
         self._wait_for_check()
         self.assertEqual(len(self._questions), 1)
-        self.assertIn("v0.2-r2", self._questions[0][1])
+        self.assertIn("v0.2-pkl", self._questions[0][1])
         self.assertEqual(started, [])
 
     def test_update_popup_yes_starts_download(self):
@@ -14690,7 +14709,7 @@ class QtUpdaterTests(unittest.TestCase):
             started.append(True))
 
         def check():
-            return {"state": "newer", "latest": "v0.2-r2",
+            return {"state": "newer", "latest": "v0.2-pkl",
                     "release": self._release()}
 
         self._window._start_update_check(manual=False,
@@ -14798,7 +14817,7 @@ class QtUpdaterTests(unittest.TestCase):
                 {"ok": True})
             pending = updater_mod.pending_update(app)
             self.assertIsNotNone(pending)
-            self.assertEqual(pending["tag"], "v0.2-r2")
+            self.assertEqual(pending["tag"], "v0.2-pkl")
             # And the next launch applies it.
             result = updater_mod.apply_pending_update(app)
             self.assertTrue(result["applied"])
@@ -14810,7 +14829,7 @@ class QtUpdaterTests(unittest.TestCase):
         received = []
 
         def check():
-            return {"state": "current", "latest": "v0.2-upd",
+            return {"state": "current", "latest": "v0.2-r2",
                     "release": None}
 
         checker = self.window_mod.UpdateChecker(
@@ -14874,6 +14893,443 @@ class QtUpdaterTests(unittest.TestCase):
         loop.exec()
         self.assertEqual(len(received), 1)
         self.assertTrue(received[0].get("cancelled"))
+
+
+@unittest.skipUnless(QT_TESTS, "Qt tests need LIGHT_ENGINE_QT_TESTS=1")
+class QtWheelTests(unittest.TestCase):
+    """R2: the wheel — the 10 category pages on the inner ring at
+    once with no slice cap, the contextual outer ring, the centre
+    dial that keeps the last-touched parameter across page
+    switches, the breadcrumb, Save + Close, the Depth quality
+    toggles, the UI12 hover preview, no Surprise button without
+    the add-on, and the inspector's Material section gone."""
+
+    PAGES = ("material", "style", "layout", "detail", "form",
+             "surface", "life", "colour", "depth", "saved")
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6 import QtWidgets
+        cls._app = QtWidgets.QApplication.instance()
+        if cls._app is None:
+            cls._app = QtWidgets.QApplication([])
+        from light_engine import window as window_mod
+        cls.MainWindow = window_mod.MainWindow
+
+    def _pump(self, rounds=10):
+        from PySide6 import QtCore, QtWidgets
+        for _ in range(rounds):
+            QtWidgets.QApplication.processEvents()
+            QtCore.QThread.msleep(50)
+
+    def _show(self, window):
+        window.resize(1280, 800)
+        window.show()
+        self._pump()
+
+    def _open_tavern_mug(self):
+        scene = scene_mod.load_scene(str(EXAMPLE))
+        window = self.MainWindow(scene=scene)
+        self._show(window)
+        window._select("mug")
+        return window
+
+    def _open_wheel(self, window):
+        window._open_wheel()
+        self._pump()
+        return window._wheel
+
+    def _focus_viewport(self, window):
+        # Xvfb has no window manager, so show() never activates
+        # the window and setFocus() is a no-op until it is
+        # active (the C3 shortcut test's pattern) — the pane
+        # shortcuts (W/E/R/Q) need a focused widget inside the
+        # pane to fire.
+        window.activateWindow()
+        window._viewport.setFocus()
+        self._pump(rounds=5)
+
+    def _click_slice(self, window, page, key):
+        from PySide6 import QtCore, QtTest
+        wheel = window._wheel
+        wheel.set_page(page)
+        window._sync_wheel()
+        self._pump()
+        slices = window._wheel_slices(page)
+        index = next(i for i, s in enumerate(slices) if s.key == key)
+        QtTest.QTest.mouseClick(
+            wheel.canvas, QtCore.Qt.LeftButton,
+            pos=wheel.canvas.slice_point("outer", index))
+        self._pump()
+
+    def _click_inner(self, window, page):
+        """Click a page slice on the inner ring for real."""
+        from PySide6 import QtCore, QtTest
+        wheel = window._wheel
+        index = self.PAGES.index(page)
+        QtTest.QTest.mouseClick(
+            wheel.canvas, QtCore.Qt.LeftButton,
+            pos=wheel.canvas.slice_point("inner", index))
+        self._pump()
+
+    def _dial_set(self, window, value):
+        dial = window._wheel.dial
+        dial.setValue(value)
+        dial.editingFinished.emit()
+        self._pump()
+
+    def _render_bytes(self, window, tmp):
+        path = os.path.join(tmp, "frame.png")
+        window.render_frame_to(0, path)
+        with open(path, "rb") as fh:
+            return fh.read()
+
+    def test_all_ten_pages_reachable_with_no_paging(self):
+        from light_engine.wheel import WHEEL_PAGES
+        window = self._open_tavern_mug()
+        wheel = self._open_wheel(window)
+        # All 10 pages exist at once — the inner ring holds
+        # every one, with no paging control anywhere.
+        self.assertEqual([key for key, _label, _desc in WHEEL_PAGES],
+                         list(self.PAGES))
+        self.assertEqual(len(window._wheel_model), 10)
+        for page in self.PAGES:
+            self._click_inner(window, page)
+            self.assertEqual(wheel.page, page, page)
+        window.close()
+
+    def test_style_page_holds_more_than_eight_slices(self):
+        # The old PieMenu raised ValueError past 8 slices; the
+        # wheel has no cap — the Style page holds all 20 styles
+        # plus None.
+        window = self._open_tavern_mug()
+        self._open_wheel(window)
+        slices = window._wheel_slices("style")
+        self.assertEqual(len(slices), 21)
+        self.assertGreater(len(slices), 8)
+        # The canvas itself takes a 21-slice ring without
+        # complaint (no ValueError, no truncation).
+        window._wheel.canvas.set_slices(slices)
+        self.assertEqual(len(window._wheel.canvas.slices), 21)
+        window.close()
+
+    def test_dial_shows_last_touched_and_persists(self):
+        window = self._open_tavern_mug()
+        wheel = self._open_wheel(window)
+        # First open: the default binding is roughness.
+        self.assertEqual(wheel.dial_label(), "Roughness")
+        self.assertEqual(wheel.dial.value(), 0.4)
+        self._click_slice(window, "material", "roughness")
+        self._dial_set(window, 0.6)
+        # A page switch keeps the dial where it was.
+        self._click_inner(window, "style")
+        self.assertEqual(wheel.dial_label(), "Roughness")
+        self.assertEqual(wheel.dial.value(), 0.6)
+        # Touch another parameter; the dial follows it — and
+        # keeps following it across the next switch too.
+        self._click_slice(window, "style", "wood_cathedral")
+        self._click_slice(window, "detail", "rings")
+        self.assertEqual(wheel.dial_label(), "Ring spacing")
+        self.assertEqual(wheel.dial.value(), 7.1)
+        self._click_inner(window, "material")
+        self.assertEqual(wheel.dial_label(), "Ring spacing")
+        self.assertEqual(wheel.dial.value(), 7.1)
+        window.close()
+
+    def test_breadcrumb_updates(self):
+        window = self._open_tavern_mug()
+        wheel = self._open_wheel(window)
+        self.assertEqual(wheel.breadcrumb_text(), "Plain color")
+        self._click_slice(window, "style", "wood_cathedral")
+        self.assertEqual(wheel.breadcrumb_text(),
+                         "Wood · Cathedral oak")
+        self._click_slice(window, "material", "advanced")
+        self._click_slice(window, "layout", "herringbone")
+        self.assertEqual(wheel.breadcrumb_text(),
+                         "Wood · Cathedral oak · Herringbone")
+        window.close()
+
+    def test_save_and_close_present(self):
+        window = self._open_tavern_mug()
+        wheel = self._open_wheel(window)
+        save = wheel.save_button
+        close = wheel.close_button
+        self.assertEqual(save.text(), "Save")
+        self.assertEqual(close.text(), "Close")
+        self.assertTrue(save.isVisible())
+        self.assertTrue(close.isVisible())
+        # Save is PO10's home — present but disabled until the
+        # saved library lands, and it says so.
+        self.assertFalse(save.isEnabled())
+        self.assertIn("PO10", save.toolTip())
+        # Close closes the wheel.
+        close.click()
+        self._pump()
+        self.assertFalse(wheel.isVisible())
+        window.close()
+
+    def test_depth_toggles_change_the_tuner_level(self):
+        window = self._open_tavern_mug()
+        wheel = self._open_wheel(window)
+        vp = window._viewport
+        self.assertEqual(vp.quality_mode, "auto")
+        self._click_slice(window, "depth", "draft")
+        self.assertEqual(vp.quality_mode, "draft")
+        self.assertEqual(vp.quality_info()[0], 4)
+        self._click_slice(window, "depth", "balanced")
+        self.assertEqual(vp.quality_mode, "balanced")
+        self.assertEqual(vp.quality_info()[0], 1)
+        self._click_slice(window, "depth", "final")
+        self.assertEqual(vp.quality_mode, "final")
+        self.assertEqual(vp.quality_info()[0], 0)
+        # Auto hands the ladder back to the tuner.
+        self._click_slice(window, "depth", "auto")
+        self.assertEqual(vp.quality_mode, "auto")
+        window.close()
+
+    def test_hover_preview_previews_and_restores(self):
+        window = self._open_tavern_mug()
+        wheel = self._open_wheel(window)
+        from PySide6 import QtTest
+        wheel.set_page("style")
+        window._sync_wheel()
+        self._pump(rounds=2)
+        slices = window._wheel_slices("style")
+        index = next(i for i, s in enumerate(slices)
+                     if s.key == "brick_stretcher")
+        point = wheel.canvas.slice_point("outer", index)
+        QtTest.QTest.mouseMove(wheel.canvas,
+                               wheel.canvas.rect().center())
+        self._pump(rounds=2)
+        expect = ("mug", {"texture": "brick_stretcher",
+                          "style": "brick_stretcher",
+                          "params": {}, "wear": {},
+                          "base_color": "#9a4a32", "roughness": 0.95,
+                          "metalness": 0.0})
+        for _ in range(10):
+            QtTest.QTest.mouseMove(wheel.canvas, point)
+            self._pump(rounds=2)
+            if window._viewport._material_preview == expect:
+                break
+        self.assertEqual(window._viewport._material_preview, expect)
+        # Leaving the ring restores the stored material.
+        QtTest.QTest.mouseMove(wheel.canvas,
+                               wheel.canvas.rect().center())
+        self._pump(rounds=4)
+        self.assertIsNone(window._viewport._material_preview)
+        window.close()
+
+    def test_no_surprise_button_without_the_addon(self):
+        # §9: the Surprise button appears only when the Surprise
+        # add-on is installed — the add-on does not exist yet,
+        # so the slot stays empty.
+        from PySide6 import QtWidgets
+        window = self._open_tavern_mug()
+        wheel = self._open_wheel(window)
+        slot = wheel.surprise_slot
+        self.assertEqual(slot.layout().count(), 0)
+        self.assertEqual(
+            [b.text() for b in wheel.findChildren(
+                QtWidgets.QPushButton)],
+            ["-", "Save", "Close"])
+        window.close()
+
+    def test_inspector_material_section_gone(self):
+        # R1 absorbed: the wheel is the material editor, so the
+        # inspector keeps only a summary + an Edit button.
+        window = self._open_tavern_mug()
+        self.assertNotIn("material", window._sections)
+        self.assertEqual(window._material_name.text(), "Plain color")
+        self.assertTrue(window._edit_material_btn.isVisible())
+        window._edit_material_btn.click()
+        self._pump()
+        self.assertTrue(window._wheel.isVisible())
+        window.close()
+
+    def test_q_opens_and_closes_the_wheel(self):
+        from PySide6 import QtCore, QtTest
+        window = self._open_tavern_mug()
+        self.assertIsNone(window._wheel)
+        self._focus_viewport(window)
+        QtTest.QTest.keyClick(window._viewport, QtCore.Qt.Key_Q)
+        self._pump()
+        self.assertIsNotNone(window._wheel)
+        self.assertTrue(window._wheel.isVisible())
+        QtTest.QTest.keyClick(window._viewport, QtCore.Qt.Key_Q)
+        self._pump()
+        self.assertFalse(window._wheel.isVisible())
+        window.close()
+
+    def test_wheel_fits_inside_the_pane(self):
+        window = self._open_tavern_mug()
+        wheel = self._open_wheel(window)
+        pane = window._center_pane
+        # Large: the main material workspace, not a popup.
+        self.assertGreaterEqual(wheel.width(), 500)
+        self.assertGreaterEqual(wheel.height(), 400)
+        # Inside the pane on every edge.
+        self.assertGreaterEqual(wheel.x(), 0)
+        self.assertGreaterEqual(wheel.y(), 0)
+        self.assertLessEqual(wheel.x() + wheel.width(),
+                             pane.width())
+        self.assertLessEqual(wheel.y() + wheel.height(),
+                             pane.height())
+        # Docked bottom-centre.
+        self.assertAlmostEqual(
+            wheel.x() + wheel.width() / 2, pane.width() / 2,
+            delta=2)
+        self.assertLessEqual(pane.height() - wheel.y()
+                             - wheel.height(), 16)
+        window.close()
+
+    def test_minimise_resize_and_move(self):
+        from PySide6 import QtCore, QtTest
+        window = self._open_tavern_mug()
+        wheel = self._open_wheel(window)
+        # Minimise collapses to a header bar; restore brings
+        # the rings back.
+        wheel._minimise_btn.click()
+        self._pump()
+        self.assertTrue(wheel.minimised)
+        self.assertTrue(wheel.canvas.isHidden())
+        self.assertLess(wheel.height(), 100)
+        wheel._minimise_btn.click()
+        self._pump()
+        self.assertFalse(wheel.minimised)
+        self.assertTrue(wheel.canvas.isVisible())
+        # Resize holds.
+        wheel.resize(560, 480)
+        self._pump()
+        self.assertEqual((wheel.width(), wheel.height()),
+                         (560, 480))
+        # Drag the header to move it (up-left, clear of the
+        # pane's clamp).
+        before = wheel.pos()
+        start = wheel._header.rect().center()
+        QtTest.QTest.mousePress(wheel._header, QtCore.Qt.LeftButton,
+                                pos=start)
+        QtTest.QTest.mouseMove(
+            wheel._header, start + QtCore.QPoint(-40, -20))
+        QtTest.QTest.mouseRelease(wheel._header,
+                                  QtCore.Qt.LeftButton,
+                                  pos=start + QtCore.QPoint(-40, -20))
+        self._pump()
+        self.assertEqual(wheel.pos(), before + QtCore.QPoint(-40, -20))
+        window.close()
+
+    def test_search_filters_styles(self):
+        window = self._open_tavern_mug()
+        wheel = self._open_wheel(window)
+        wheel._search.setText("oak")
+        self._pump()
+        # Typing jumps to the Style page with the matches.
+        self.assertEqual(wheel.page, "style")
+        self.assertEqual(_wheel_page_keys(window, "style"),
+                         ["wood_cathedral"])
+        wheel.clear_search()
+        self._pump()
+        self.assertEqual(len(_wheel_page_keys(window, "style")), 21)
+        window.close()
+
+    def test_no_selection_disables_material_slices(self):
+        window = self._open_tavern_mug()
+        wheel = self._open_wheel(window)
+        window._select(None)
+        self._pump()
+        for page in self.PAGES:
+            if page == "depth":
+                # App state, not material: always enabled.
+                self.assertTrue(
+                    all(s.enabled
+                        for s in window._wheel_slices(page)), page)
+            else:
+                self.assertFalse(
+                    any(s.enabled
+                        for s in window._wheel_slices(page)), page)
+        self.assertEqual(wheel.breadcrumb_text(), "Plain color")
+        window.close()
+
+    def test_esc_closes_the_wheel(self):
+        from PySide6 import QtCore, QtTest
+        window = self._open_tavern_mug()
+        wheel = self._open_wheel(window)
+        window._preview_style("wood_cathedral")
+        self.assertIsNotNone(window._viewport._material_preview)
+        QtTest.QTest.keyClick(wheel.canvas, QtCore.Qt.Key_Escape)
+        self._pump()
+        self.assertFalse(wheel.isVisible())
+        self.assertIsNone(window._viewport._material_preview)
+        window.close()
+
+    def test_click_outside_closes_the_wheel(self):
+        from PySide6 import QtCore, QtTest
+        window = self._open_tavern_mug()
+        wheel = self._open_wheel(window)
+        # The top-left of the viewport is clear of the docked
+        # wheel (bottom-centre).
+        QtTest.QTest.mouseClick(window._viewport,
+                                QtCore.Qt.LeftButton,
+                                pos=QtCore.QPoint(10, 10))
+        self._pump()
+        self.assertFalse(wheel.isVisible())
+        window.close()
+
+    def test_no_pick_close_changes_no_pixel_and_no_undo_step(self):
+        window = self._open_tavern_mug()
+        with tempfile.TemporaryDirectory() as tmp:
+            before = self._render_bytes(window, tmp)
+            self._open_wheel(window)
+            self._click_inner(window, "style")
+            self._click_inner(window, "depth")
+            window._close_wheel()
+            self._pump()
+            self.assertEqual(self._render_bytes(window, tmp), before)
+        self.assertEqual(len(window._undo_stack), 0)
+        window.close()
+
+    def test_arrow_keys_navigate_and_enter_picks(self):
+        from PySide6 import QtCore, QtTest
+        window = self._open_tavern_mug()
+        wheel = self._open_wheel(window)
+        # Start from a known hover: the centre clears the ring
+        # hover, so Right lands on the first outer slice.
+        QtTest.QTest.mouseMove(wheel.canvas,
+                               wheel.canvas.rect().center())
+        self._pump(rounds=2)
+        # Right starts on the first outer slice (Roughness);
+        # Enter loads it into the dial.
+        QtTest.QTest.keyClick(wheel.canvas, QtCore.Qt.Key_Right)
+        QtTest.QTest.keyClick(wheel.canvas, QtCore.Qt.Key_Return)
+        self._pump()
+        self.assertEqual(wheel.dial_label(), "Roughness")
+        # Right again steps to Metalness; Enter loads it.
+        QtTest.QTest.keyClick(wheel.canvas, QtCore.Qt.Key_Right)
+        QtTest.QTest.keyClick(wheel.canvas, QtCore.Qt.Key_Return)
+        self._pump()
+        self.assertEqual(wheel.dial_label(), "Metalness")
+        # Down moves the hover to the inner ring; Right steps
+        # to the Style page; Enter switches to it.
+        QtTest.QTest.keyClick(wheel.canvas, QtCore.Qt.Key_Down)
+        QtTest.QTest.keyClick(wheel.canvas, QtCore.Qt.Key_Right)
+        QtTest.QTest.keyClick(wheel.canvas, QtCore.Qt.Key_Return)
+        self._pump()
+        self.assertEqual(wheel.page, "style")
+        window.close()
+
+    def test_shortcuts_work_after_the_wheel_closes(self):
+        from PySide6 import QtCore, QtTest
+        window = self._open_tavern_mug()
+        self._open_wheel(window)
+        window._close_wheel()
+        self._pump()
+        # Closing hands focus back to the viewport (a no-op
+        # under Xvfb until the window is active — see
+        # _focus_viewport).
+        self._focus_viewport(window)
+        vp = window._viewport
+        QtTest.QTest.keyClick(vp, QtCore.Qt.Key_E)
+        self.assertEqual(vp.gizmo_mode, "rotate")
+        window.close()
 
 
 if __name__ == "__main__":
